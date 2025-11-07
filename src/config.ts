@@ -157,6 +157,14 @@ const config: Config = {
     },
   },
 
+  // Stream restart settings
+  streaming: {
+    // Interval for automatic stream restarts (milliseconds)
+    // Set to 0 to disable automatic restarts
+    // Default: 300000ms (5 minutes)
+    restartInterval: 300000,
+  },
+
   // Process management
   process: {
     // Grace period for FFmpeg process shutdown (milliseconds)

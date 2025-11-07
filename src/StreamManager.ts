@@ -5,7 +5,12 @@
 
 import { StreamMonitor } from "./StreamMonitor.js";
 import { FFmpegManager } from "./FFmpegManager.js";
-import { logStreamEvent, logStreamWarning, logStreamError } from "./logger.js";
+import {
+  logStreamEvent,
+  logStreamWarning,
+  logStreamError,
+  logStreamDebug,
+} from "./logger.js";
 import config from "./config.js";
 import type { StreamConfig, StreamState, StreamStatus } from "./types.js";
 
@@ -28,6 +33,10 @@ export class StreamManager {
   private state: StreamState;
   private retryCount: number = 0;
   private retryTimeout: NodeJS.Timeout | null = null;
+
+  // Automatic restart timer
+  private restartTimer: NodeJS.Timeout | null = null;
+  private lastRestartTime: number | null = null;
 
   private monitor: StreamMonitor;
   private ffmpeg: FFmpegManager;
@@ -92,6 +101,9 @@ export class StreamManager {
       this.orphanedStateCheckInterval = null;
     }
 
+    // Clear automatic restart timer
+    this.cancelAutomaticRestart();
+
     // Stop monitoring
     this.monitor.stop();
 
@@ -123,12 +135,16 @@ export class StreamManager {
 
       // Stream started successfully
       this.retryCount = 0;
+      this.lastRestartTime = Date.now();
       this.setState(States.LIVE);
 
       logStreamEvent(this.id, "Live stream started successfully");
 
       // Start monitoring
       this.monitor.start();
+
+      // Schedule automatic restart
+      this.scheduleAutomaticRestart();
 
       // DIAGNOSTIC: Schedule periodic check for orphaned state
       this.scheduleOrphanedStateCheck();
@@ -311,6 +327,95 @@ export class StreamManager {
         this.handleStreamOffline();
       }
     }, 30000); // Check every 30 seconds
+  }
+
+  /**
+   * Schedule automatic restart of live stream
+   */
+  private scheduleAutomaticRestart(): void {
+    // Cancel any existing restart timer
+    this.cancelAutomaticRestart();
+
+    // Check if automatic restarts are enabled
+    if (config.streaming.restartInterval <= 0) {
+      return;
+    }
+
+    // Only schedule restart for live streams
+    if (this.state !== States.LIVE) {
+      return;
+    }
+
+    logStreamEvent(this.id, "Scheduling automatic restart", {
+      intervalMs: config.streaming.restartInterval,
+      intervalMinutes: config.streaming.restartInterval / 60000,
+    });
+
+    this.restartTimer = setTimeout(async () => {
+      await this.performAutomaticRestart();
+    }, config.streaming.restartInterval);
+  }
+
+  /**
+   * Cancel scheduled automatic restart
+   */
+  private cancelAutomaticRestart(): void {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+      logStreamDebug(this.id, "Automatic restart timer cancelled");
+    }
+  }
+
+  /**
+   * Perform automatic restart of live stream
+   */
+  private async performAutomaticRestart(): Promise<void> {
+    // Only restart if stream is in LIVE state
+    if (this.state !== States.LIVE) {
+      logStreamDebug(
+        this.id,
+        "Skipping automatic restart - stream not in LIVE state",
+        {
+          currentState: this.state,
+        }
+      );
+      return;
+    }
+
+    const timeSinceLastRestart = this.lastRestartTime
+      ? Date.now() - this.lastRestartTime
+      : null;
+
+    logStreamEvent(this.id, "Performing scheduled automatic restart", {
+      timeSinceLastRestartMs: timeSinceLastRestart,
+      timeSinceLastRestartMinutes: timeSinceLastRestart
+        ? (timeSinceLastRestart / 60000).toFixed(2)
+        : "N/A",
+    });
+
+    // Record restart time
+    this.lastRestartTime = Date.now();
+
+    try {
+      // Stop current stream
+      await this.ffmpeg.stopLiveStream();
+
+      // Start new stream
+      await this.ffmpeg.startLiveStream(this.rtspUrl, this.youtubeUrl);
+
+      logStreamEvent(this.id, "Automatic restart completed successfully");
+
+      // Schedule next restart
+      this.scheduleAutomaticRestart();
+    } catch (error) {
+      logStreamError(this.id, error as Error, {
+        context: "Automatic restart failed",
+      });
+
+      // Fall back to normal retry logic
+      await this.retryConnection();
+    }
   }
 
   /**

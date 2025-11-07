@@ -79,12 +79,17 @@ export interface ProcessConfig {
   forceKillTimeout: number;
 }
 
+export interface StreamingConfig {
+  restartInterval: number;
+}
+
 export interface Config {
   streams: StreamConfig[];
   monitoring: MonitoringConfig;
   retry: RetryConfig;
   ffmpeg: FFmpegConfig;
   logging: LoggingConfig;
+  streaming: StreamingConfig;
   process: ProcessConfig;
 }
 
