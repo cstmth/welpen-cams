@@ -87,8 +87,11 @@ export class FFmpegManager {
         );
       });
 
+      let lastStderrOutput = "";
+
       this.liveProcess.stderr?.on("data", (data: Buffer) => {
         const output = data.toString();
+        lastStderrOutput = output; // Capture last output before potential exit
 
         // Check for successful stream start
         if (
@@ -124,10 +127,25 @@ export class FFmpegManager {
       this.liveProcess.on(
         "exit",
         (code: number | null, signal: string | null) => {
-          logStreamEvent(this.streamId, "Live stream process exited", {
+          // Enhanced logging for diagnosis
+          const exitInfo: any = {
             code,
             signal,
-          });
+            hasStarted,
+            isShuttingDown: this.isShuttingDown,
+            lastStderr: lastStderrOutput.trim().slice(-500), // Last 500 chars
+          };
+
+          logStreamEvent(this.streamId, "Live stream process exited", exitInfo);
+
+          // DIAGNOSTIC: Log if process exits unexpectedly while running
+          if (hasStarted && !this.isShuttingDown && code === 0) {
+            logStreamWarning(
+              this.streamId,
+              "DIAGNOSTIC: Live FFmpeg process exited unexpectedly with code 0 (normal exit) - this may indicate YouTube connection loss or RTSP source disconnection",
+              exitInfo
+            );
+          }
 
           cleanup();
           this.liveProcess = null;

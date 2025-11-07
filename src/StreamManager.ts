@@ -86,6 +86,12 @@ export class StreamManager {
       this.offlineRetryTimeout = null;
     }
 
+    // Clear orphaned state check
+    if (this.orphanedStateCheckInterval) {
+      clearInterval(this.orphanedStateCheckInterval);
+      this.orphanedStateCheckInterval = null;
+    }
+
     // Stop monitoring
     this.monitor.stop();
 
@@ -123,6 +129,9 @@ export class StreamManager {
 
       // Start monitoring
       this.monitor.start();
+
+      // DIAGNOSTIC: Schedule periodic check for orphaned state
+      this.scheduleOrphanedStateCheck();
     } catch (error) {
       logStreamError(this.id, error as Error, {
         context: "Failed to start live stream",
@@ -259,6 +268,49 @@ export class StreamManager {
         to: newState,
       });
     }
+  }
+
+  /**
+   * DIAGNOSTIC: Check for orphaned state (state=LIVE but no process)
+   */
+  private orphanedStateCheckInterval: NodeJS.Timeout | null = null;
+
+  private scheduleOrphanedStateCheck(): void {
+    // Clear any existing check
+    if (this.orphanedStateCheckInterval) {
+      clearInterval(this.orphanedStateCheckInterval);
+    }
+
+    // Check every 30 seconds
+    this.orphanedStateCheckInterval = setInterval(() => {
+      const status = this.getStatus();
+
+      // Detect orphaned state: state is LIVE but no FFmpeg process is running
+      if (
+        status.state === States.LIVE &&
+        !status.hasLiveProcess &&
+        !status.hasOfflineProcess
+      ) {
+        logStreamWarning(
+          this.id,
+          "DIAGNOSTIC: Orphaned state detected - state is LIVE but no FFmpeg process running. This indicates the process exited without triggering recovery.",
+          {
+            state: status.state,
+            hasLiveProcess: status.hasLiveProcess,
+            hasOfflineProcess: status.hasOfflineProcess,
+            retryCount: status.retryCount,
+            isMonitoring: status.isMonitoring,
+          }
+        );
+
+        // Trigger recovery
+        logStreamEvent(
+          this.id,
+          "DIAGNOSTIC: Triggering recovery for orphaned state"
+        );
+        this.handleStreamOffline();
+      }
+    }, 30000); // Check every 30 seconds
   }
 
   /**
