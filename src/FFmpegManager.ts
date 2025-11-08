@@ -62,7 +62,28 @@ export class FFmpegManager {
         youtubeUrl,
       ];
 
+      // DIAGNOSTIC: Log FFmpeg command being executed
+      logStreamDebug(this.streamId, "DIAGNOSTIC: Spawning FFmpeg process", {
+        command: "ffmpeg",
+        argsCount: args.length,
+        rtspMasked: this.maskUrl(rtspUrl),
+        youtubeMasked: this.maskUrl(youtubeUrl),
+      });
+
       this.liveProcess = spawn("ffmpeg", args);
+
+      // DIAGNOSTIC: Log process spawn result
+      if (this.liveProcess.pid) {
+        logStreamDebug(
+          this.streamId,
+          `DIAGNOSTIC: FFmpeg process spawned successfully with PID ${this.liveProcess.pid}`
+        );
+      } else {
+        logStreamWarning(
+          this.streamId,
+          "DIAGNOSTIC: FFmpeg process spawned but no PID assigned yet"
+        );
+      }
 
       let hasStarted = false;
       let startupTimeout: NodeJS.Timeout | null = null;
@@ -88,10 +109,20 @@ export class FFmpegManager {
       });
 
       let lastStderrOutput = "";
+      let allStderrOutput = ""; // DIAGNOSTIC: Capture all output
 
       this.liveProcess.stderr?.on("data", (data: Buffer) => {
         const output = data.toString();
         lastStderrOutput = output; // Capture last output before potential exit
+        allStderrOutput += output; // DIAGNOSTIC: Accumulate all output
+
+        // DIAGNOSTIC: Log ALL stderr output during startup phase
+        if (!hasStarted) {
+          logStreamDebug(
+            this.streamId,
+            `DIAGNOSTIC: FFmpeg stderr during startup: ${output.trim()}`
+          );
+        }
 
         // Check for successful stream start
         if (
@@ -160,6 +191,19 @@ export class FFmpegManager {
       startupTimeout = setTimeout(() => {
         if (!hasStarted) {
           logStreamWarning(this.streamId, "Live stream startup timeout");
+          // DIAGNOSTIC: Log all captured output to understand what FFmpeg produced
+          logStreamError(
+            this.streamId,
+            new Error(
+              "Stream startup timeout - FFmpeg did not produce expected output"
+            ),
+            {
+              context: "Startup timeout diagnostics",
+              allStderrOutput: allStderrOutput.slice(-2000), // Last 2000 chars
+              expectedPatterns: ["Stream mapping:", "frame="],
+              processStillRunning: this.liveProcess !== null,
+            }
+          );
           cleanup();
           this.stopLiveStream();
           reject(new Error("Stream startup timeout"));

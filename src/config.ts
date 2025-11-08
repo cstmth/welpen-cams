@@ -126,7 +126,7 @@ const config: Config = {
   // Logging configuration
   logging: {
     // Log level: 'error', 'warn', 'info', 'debug'
-    level: "info",
+    level: "debug", // DIAGNOSTIC: Temporarily set to debug for troubleshooting
 
     // Console logging
     console: {
