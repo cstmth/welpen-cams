@@ -1,0 +1,15 @@
+services:
+  welpen-relay:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - USE_LOCAL_RELAY=true
+    # GPU passthrough for Intel Quick Sync (h264_qsv).
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./logs:/app/logs
+    # Uncomment to access the relay from outside the container (e.g. VLC).
+    # ports:
+    #   - "8554:8554"

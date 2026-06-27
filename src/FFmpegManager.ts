@@ -1,8 +1,3 @@
-/**
- * FFmpegManager - Manages FFmpeg processes for live streaming and offline placeholders
- * Handles process lifecycle, cleanup, and proper termination
- */
-
 import { spawn, ChildProcess } from "child_process";
 import {
   logStreamEvent,
@@ -11,6 +6,8 @@ import {
   logStreamDebug,
 } from "./logger.js";
 import config from "./config.js";
+import { StreamStats } from "./StreamStats.js";
+import type { CombinedStreamConfig } from "./types.js";
 
 export class FFmpegManager {
   private streamId: string;
@@ -18,13 +15,14 @@ export class FFmpegManager {
   private offlineProcess: ChildProcess | null = null;
   private isShuttingDown: boolean = false;
 
+  // Invoked when the running live/combined process stalls (frames stop
+  // flowing). The owning manager wires this to a restart.
+  public onLiveStall: (() => void) | null = null;
+
   constructor(streamId: string) {
     this.streamId = streamId;
   }
 
-  /**
-   * Start live stream from RTSP to YouTube
-   */
   startLiveStream(rtspUrl: string, youtubeUrl: string): Promise<void> {
     return new Promise((resolve, reject) => {
       if (this.liveProcess) {
@@ -38,183 +36,241 @@ export class FFmpegManager {
         youtube: this.maskUrl(youtubeUrl),
       });
 
+      const { live } = config.ffmpeg;
       const args = [
-        "-rtsp_transport",
-        "tcp",
+        ...live.inputOptions,
         "-i",
         rtspUrl,
-        "-c:v",
-        "copy",
-        "-af",
-        "volume=0",
-        "-c:a",
-        "aac",
-        "-b:a",
-        config.ffmpeg.live.audioBitrate,
-        "-f",
-        "flv",
-        "-reconnect",
-        "1",
-        "-reconnect_streamed",
-        "1",
-        "-reconnect_delay_max",
-        "5",
+        ...live.outputOptions,
         youtubeUrl,
       ];
 
-      // DIAGNOSTIC: Log FFmpeg command being executed
-      logStreamDebug(this.streamId, "DIAGNOSTIC: Spawning FFmpeg process", {
-        command: "ffmpeg",
-        argsCount: args.length,
-        rtspMasked: this.maskUrl(rtspUrl),
-        youtubeMasked: this.maskUrl(youtubeUrl),
-      });
-
-      this.liveProcess = spawn("ffmpeg", args);
-
-      // DIAGNOSTIC: Log process spawn result
-      if (this.liveProcess.pid) {
-        logStreamDebug(
-          this.streamId,
-          `DIAGNOSTIC: FFmpeg process spawned successfully with PID ${this.liveProcess.pid}`
-        );
-      } else {
-        logStreamWarning(
-          this.streamId,
-          "DIAGNOSTIC: FFmpeg process spawned but no PID assigned yet"
-        );
-      }
-
-      let hasStarted = false;
-      let startupTimeout: NodeJS.Timeout | null = null;
-
-      // Cleanup function to remove all listeners and clear timeout
-      const cleanup = () => {
-        if (startupTimeout) {
-          clearTimeout(startupTimeout);
-          startupTimeout = null;
-        }
-        if (this.liveProcess) {
-          this.liveProcess.stdout?.removeAllListeners();
-          this.liveProcess.stderr?.removeAllListeners();
-          this.liveProcess.removeAllListeners();
-        }
-      };
-
-      this.liveProcess.stdout?.on("data", (data: Buffer) => {
-        logStreamDebug(
-          this.streamId,
-          `FFmpeg stdout: ${data.toString().trim()}`
-        );
-      });
-
-      let lastStderrOutput = "";
-      let allStderrOutput = ""; // DIAGNOSTIC: Capture all output
-
-      this.liveProcess.stderr?.on("data", (data: Buffer) => {
-        const output = data.toString();
-        lastStderrOutput = output; // Capture last output before potential exit
-        allStderrOutput += output; // DIAGNOSTIC: Accumulate all output
-
-        // DIAGNOSTIC: Log ALL stderr output during startup phase
-        if (!hasStarted) {
-          logStreamDebug(
-            this.streamId,
-            `DIAGNOSTIC: FFmpeg stderr during startup: ${output.trim()}`
-          );
-        }
-
-        // Check for successful stream start
-        if (
-          !hasStarted &&
-          (output.includes("Stream mapping:") || output.includes("frame="))
-        ) {
-          hasStarted = true;
-          logStreamEvent(this.streamId, "Live stream started successfully");
-          if (startupTimeout) {
-            clearTimeout(startupTimeout);
-            startupTimeout = null;
-          }
-          resolve();
-        }
-
-        // Log errors and warnings
-        if (output.includes("error") || output.includes("Error")) {
-          logStreamWarning(this.streamId, `FFmpeg: ${output.trim()}`);
-        }
-      });
-
-      this.liveProcess.on("error", (error: Error) => {
-        logStreamError(this.streamId, error, {
-          context: "Live stream process error",
-        });
-
-        if (!hasStarted) {
-          cleanup();
-          reject(error);
-        }
-      });
-
-      this.liveProcess.on(
-        "exit",
-        (code: number | null, signal: string | null) => {
-          // Enhanced logging for diagnosis
-          const exitInfo: any = {
-            code,
-            signal,
-            hasStarted,
-            isShuttingDown: this.isShuttingDown,
-            lastStderr: lastStderrOutput.trim().slice(-500), // Last 500 chars
-          };
-
-          logStreamEvent(this.streamId, "Live stream process exited", exitInfo);
-
-          // DIAGNOSTIC: Log if process exits unexpectedly while running
-          if (hasStarted && !this.isShuttingDown && code === 0) {
-            logStreamWarning(
-              this.streamId,
-              "DIAGNOSTIC: Live FFmpeg process exited unexpectedly with code 0 (normal exit) - this may indicate YouTube connection loss or RTSP source disconnection",
-              exitInfo
-            );
-          }
-
-          cleanup();
-          this.liveProcess = null;
-
-          if (!hasStarted && !this.isShuttingDown) {
-            reject(new Error(`FFmpeg exited with code ${code}`));
-          }
-        }
-      );
-
-      // Timeout for startup
-      startupTimeout = setTimeout(() => {
-        if (!hasStarted) {
-          logStreamWarning(this.streamId, "Live stream startup timeout");
-          // DIAGNOSTIC: Log all captured output to understand what FFmpeg produced
-          logStreamError(
-            this.streamId,
-            new Error(
-              "Stream startup timeout - FFmpeg did not produce expected output"
-            ),
-            {
-              context: "Startup timeout diagnostics",
-              allStderrOutput: allStderrOutput.slice(-2000), // Last 2000 chars
-              expectedPatterns: ["Stream mapping:", "frame="],
-              processStillRunning: this.liveProcess !== null,
-            }
-          );
-          cleanup();
-          this.stopLiveStream();
-          reject(new Error("Stream startup timeout"));
-        }
-      }, 30000); // 30 second timeout
+      this.spawnLiveProcess(args, resolve, reject);
     });
   }
 
-  /**
-   * Stop live stream process
-   */
+  startCombinedStream(
+    inputs: { url: string; isOffline: boolean }[],
+    imagePath: string | undefined,
+    youtubeUrl: string,
+    streamConfig: CombinedStreamConfig
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.liveProcess) {
+        logStreamWarning(this.streamId, "Live stream already running");
+        resolve();
+        return;
+      }
+
+      logStreamEvent(this.streamId, "Starting combined stream", {
+        youtube: this.maskUrl(youtubeUrl),
+        cameras: inputs.length,
+      });
+
+      const { tileWidth, tileHeight, framerate, inputOptions, outputOptions } =
+        streamConfig;
+      const args: string[] = [];
+
+      for (const input of inputs) {
+        if (input.isOffline) {
+          args.push(
+            "-f", "lavfi",
+            "-i", `color=c=black:s=${tileWidth}x${tileHeight}:r=${framerate}`
+          );
+        } else {
+          args.push(...inputOptions, "-i", input.url);
+        }
+      }
+
+      const useImage = imagePath && inputs.length < 4;
+      if (useImage) {
+        args.push("-loop", "1", "-i", imagePath);
+      }
+
+      const totalVideoInputs = useImage
+        ? inputs.length + 1
+        : inputs.length;
+
+      args.push(
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=channel_layout=stereo:sample_rate=44100"
+      );
+
+      // Normalize each input to a constant fps first, so the 4 tiles stay frame
+      // synchronized for hstack/vstack (independent live inputs otherwise drift
+      // and cause drop/duplicate churn in the composite).
+      const scaleFilter = (i: number) =>
+        `[${i}:v]fps=${framerate},scale=${tileWidth}:${tileHeight}:force_original_aspect_ratio=decrease,` +
+        `pad=${tileWidth}:${tileHeight}:(ow-iw)/2:(oh-ih)/2,setsar=1[v${i}]`;
+
+      const filterParts = [];
+
+      if (totalVideoInputs === 1) {
+        filterParts.push(`[0:v]fps=${framerate},scale=${tileWidth * 2}:${tileHeight * 2}:force_original_aspect_ratio=decrease,pad=${tileWidth * 2}:${tileHeight * 2}:(ow-iw)/2:(oh-ih)/2,setsar=1[out]`);
+      } else if (totalVideoInputs === 2) {
+        filterParts.push(scaleFilter(0), scaleFilter(1));
+        filterParts.push(`[v0][v1]hstack=inputs=2[row]`);
+        filterParts.push(`[row]pad=${tileWidth * 2}:${tileHeight * 2}:0:(oh-ih)/2[out]`);
+      } else if (totalVideoInputs === 3) {
+        filterParts.push(scaleFilter(0), scaleFilter(1), scaleFilter(2));
+        filterParts.push(`color=c=black:s=${tileWidth}x${tileHeight}:r=${framerate}[v3]`);
+        filterParts.push(
+          "[v0][v1]hstack=inputs=2[top]",
+          "[v2][v3]hstack=inputs=2[bottom]",
+          "[top][bottom]vstack=inputs=2[out]"
+        );
+      } else if (totalVideoInputs >= 4) {
+        for (let i = 0; i < 4; i++) {
+          filterParts.push(scaleFilter(i));
+        }
+        filterParts.push(
+          "[v0][v1]hstack=inputs=2[top]",
+          "[v2][v3]hstack=inputs=2[bottom]",
+          "[top][bottom]vstack=inputs=2[out]"
+        );
+      }
+
+      const audioIndex = totalVideoInputs;
+      args.push(
+        "-filter_complex",
+        filterParts.join(";"),
+        "-map",
+        "[out]",
+        "-map",
+        `${audioIndex}:a`,
+        ...outputOptions,
+        youtubeUrl
+      );
+
+      this.spawnLiveProcess(args, resolve, reject);
+    });
+  }
+
+  private spawnLiveProcess(
+    args: string[],
+    resolve: () => void,
+    reject: (error: Error) => void
+  ): void {
+    const diag = config.diagnostics;
+    const prefixArgs = ["-hide_banner"];
+    let stats: StreamStats | null = null;
+    if (diag.statsEnabled) {
+      prefixArgs.push(
+        "-nostats",
+        "-stats_period",
+        String(diag.statsPeriod),
+        "-progress",
+        "pipe:1"
+      );
+      const onStall = diag.restartOnStall
+        ? () => this.onLiveStall?.()
+        : undefined;
+      stats = new StreamStats(this.streamId, diag.reportInterval, onStall);
+      stats.start();
+    }
+
+    this.liveProcess = spawn("ffmpeg", [...prefixArgs, ...args]);
+
+    let hasStarted = false;
+    let settled = false;
+    let startupTimeout: NodeJS.Timeout | null = null;
+    let lastStderrOutput = "";
+
+    const settleResolve = () => {
+      if (settled) return;
+      settled = true;
+      hasStarted = true;
+      if (startupTimeout) {
+        clearTimeout(startupTimeout);
+        startupTimeout = null;
+      }
+      resolve();
+    };
+
+    const settleReject = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      if (startupTimeout) {
+        clearTimeout(startupTimeout);
+        startupTimeout = null;
+      }
+      reject(error);
+    };
+
+    this.liveProcess.stdout?.on("data", (data: Buffer) => {
+      if (stats) {
+        stats.ingestProgress(data.toString());
+      } else {
+        logStreamDebug(
+          this.streamId,
+          `FFmpeg stdout: ${this.redactOutput(data.toString().trim())}`
+        );
+      }
+    });
+
+    this.liveProcess.stderr?.on("data", (data: Buffer) => {
+      const output = data.toString();
+      lastStderrOutput = output;
+      stats?.ingestStderr(output);
+
+      if (!hasStarted) {
+        logStreamDebug(
+          this.streamId,
+          `FFmpeg stderr during startup: ${this.redactOutput(output.trim())}`
+        );
+      }
+
+      if (
+        !hasStarted &&
+        (output.includes("Stream mapping:") || output.includes("frame="))
+      ) {
+        logStreamEvent(this.streamId, "Live stream started successfully");
+        settleResolve();
+      }
+
+      if (output.includes("error") || output.includes("Error")) {
+        logStreamWarning(
+          this.streamId,
+          `FFmpeg: ${this.redactOutput(output.trim())}`
+        );
+      }
+    });
+
+    this.liveProcess.on("error", (error: Error) => {
+      logStreamError(this.streamId, error, {
+        context: "Live stream process error",
+      });
+      stats?.stop();
+      settleReject(error);
+    });
+
+    this.liveProcess.on(
+      "exit",
+      (code: number | null, signal: string | null) => {
+        logStreamEvent(this.streamId, "Live stream process exited", {
+          code,
+          signal,
+          hasStarted,
+          isShuttingDown: this.isShuttingDown,
+          lastStderr: this.redactOutput(lastStderrOutput.trim().slice(-500)),
+        });
+
+        stats?.stop();
+        this.liveProcess = null;
+        settleReject(new Error(`FFmpeg exited with code ${code}`));
+      }
+    );
+
+    startupTimeout = setTimeout(() => {
+      startupTimeout = null;
+      logStreamWarning(this.streamId, "Live stream startup timeout");
+      this.stopLiveStream();
+      settleReject(new Error("Stream startup timeout"));
+    }, 30000);
+  }
+
   stopLiveStream(): Promise<void> {
     return new Promise((resolve) => {
       if (!this.liveProcess) {
@@ -224,31 +280,41 @@ export class FFmpegManager {
 
       logStreamEvent(this.streamId, "Stopping live stream");
 
-      const process = this.liveProcess;
+      const proc = this.liveProcess;
       this.liveProcess = null;
 
-      // Try graceful shutdown first
-      process.kill("SIGTERM");
+      if (proc.exitCode !== null) {
+        resolve();
+        return;
+      }
 
-      // Force kill after timeout
+      let resolved = false;
+      const done = () => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(forceKillTimeout);
+        resolve();
+      };
+
+      proc.kill("SIGTERM");
+
       const forceKillTimeout = setTimeout(() => {
-        if (process.killed === false) {
-          logStreamWarning(this.streamId, "Force killing live stream process");
-          process.kill("SIGKILL");
+        logStreamWarning(this.streamId, "Force killing live stream process");
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* already dead */
         }
+        done();
       }, config.process.shutdownTimeout);
 
-      process.on("exit", () => {
-        clearTimeout(forceKillTimeout);
+      proc.once("exit", () => {
         logStreamEvent(this.streamId, "Live stream stopped");
-        resolve();
+        done();
       });
     });
   }
 
-  /**
-   * Start offline placeholder stream to YouTube
-   */
   startOfflineStream(youtubeUrl: string): Promise<void> {
     return new Promise((resolve, reject) => {
       if (this.offlineProcess) {
@@ -263,96 +329,73 @@ export class FFmpegManager {
 
       const { offline } = config.ffmpeg;
 
-      // Build drawtext filter
-      const textFilter =
-        `drawtext=text='${offline.text}':` +
-        `fontsize=${offline.fontSize}:` +
-        `fontcolor=${offline.fontColor}:` +
-        `x=(w-text_w)/2:` +
-        `y=(h-text_h)/2`;
-
       const args = [
-        "-f",
-        "lavfi",
+        ...offline.inputOptions,
+        "-framerate",
+        String(offline.framerate),
         "-i",
-        `color=c=${offline.backgroundColor}:s=${offline.width}x${offline.height}:r=${offline.framerate}`,
+        offline.imagePath,
         "-f",
         "lavfi",
         "-i",
         "anullsrc=channel_layout=stereo:sample_rate=44100",
-        "-vf",
-        textFilter,
-        "-af",
-        "volume=0",
-        "-c:v",
-        offline.videoCodec,
-        "-preset",
-        offline.preset,
-        "-b:v",
-        offline.videoBitrate,
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-f",
-        offline.format,
-        "-reconnect",
-        "1",
-        "-reconnect_streamed",
-        "1",
-        "-reconnect_delay_max",
-        "5",
+        ...offline.outputOptions,
         youtubeUrl,
       ];
 
-      this.offlineProcess = spawn("ffmpeg", args);
+      this.offlineProcess = spawn("ffmpeg", ["-hide_banner", ...args]);
 
       let hasStarted = false;
+      let settled = false;
       let startupTimeout: NodeJS.Timeout | null = null;
 
-      // Cleanup function to remove all listeners and clear timeout
-      const cleanup = () => {
+      const settleResolve = () => {
+        if (settled) return;
+        settled = true;
+        hasStarted = true;
         if (startupTimeout) {
           clearTimeout(startupTimeout);
           startupTimeout = null;
         }
-        if (this.offlineProcess) {
-          this.offlineProcess.stdout?.removeAllListeners();
-          this.offlineProcess.stderr?.removeAllListeners();
-          this.offlineProcess.removeAllListeners();
+        resolve();
+      };
+
+      const settleReject = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        if (startupTimeout) {
+          clearTimeout(startupTimeout);
+          startupTimeout = null;
         }
+        reject(error);
       };
 
       this.offlineProcess.stdout?.on("data", (data: Buffer) => {
         logStreamDebug(
           this.streamId,
-          `FFmpeg offline stdout: ${data.toString().trim()}`
+          `FFmpeg offline stdout: ${this.redactOutput(data.toString().trim())}`
         );
       });
 
       this.offlineProcess.stderr?.on("data", (data: Buffer) => {
         const output = data.toString();
 
-        // Check for successful stream start
         if (
           !hasStarted &&
           (output.includes("Stream mapping:") || output.includes("frame="))
         ) {
-          hasStarted = true;
           logStreamEvent(
             this.streamId,
             "Offline placeholder started successfully"
           );
-          if (startupTimeout) {
-            clearTimeout(startupTimeout);
-            startupTimeout = null;
-          }
-          resolve();
+          settleResolve();
         }
 
-        // Log errors and warnings
         if (output.includes("error") || output.includes("Error")) {
-          logStreamWarning(this.streamId, `FFmpeg offline: ${output.trim()}`);
+          logStreamWarning(
+            this.streamId,
+            `FFmpeg offline: ${this.redactOutput(output.trim())}`
+          );
         }
       });
 
@@ -360,11 +403,7 @@ export class FFmpegManager {
         logStreamError(this.streamId, error, {
           context: "Offline stream process error",
         });
-
-        if (!hasStarted) {
-          cleanup();
-          reject(error);
-        }
+        settleReject(error);
       });
 
       this.offlineProcess.on(
@@ -375,30 +414,20 @@ export class FFmpegManager {
             signal,
           });
 
-          cleanup();
           this.offlineProcess = null;
-
-          if (!hasStarted && !this.isShuttingDown) {
-            reject(new Error(`FFmpeg offline exited with code ${code}`));
-          }
+          settleReject(new Error(`FFmpeg offline exited with code ${code}`));
         }
       );
 
-      // Timeout for startup
       startupTimeout = setTimeout(() => {
-        if (!hasStarted) {
-          logStreamWarning(this.streamId, "Offline stream startup timeout");
-          cleanup();
-          this.stopOfflineStream();
-          reject(new Error("Offline stream startup timeout"));
-        }
-      }, 30000); // 30 second timeout
+        startupTimeout = null;
+        logStreamWarning(this.streamId, "Offline stream startup timeout");
+        this.stopOfflineStream();
+        settleReject(new Error("Offline stream startup timeout"));
+      }, 30000);
     });
   }
 
-  /**
-   * Stop offline placeholder stream
-   */
   stopOfflineStream(): Promise<void> {
     return new Promise((resolve) => {
       if (!this.offlineProcess) {
@@ -408,56 +437,63 @@ export class FFmpegManager {
 
       logStreamEvent(this.streamId, "Stopping offline placeholder stream");
 
-      const process = this.offlineProcess;
+      const proc = this.offlineProcess;
       this.offlineProcess = null;
 
-      // Try graceful shutdown first
-      process.kill("SIGTERM");
+      if (proc.exitCode !== null) {
+        resolve();
+        return;
+      }
 
-      // Force kill after timeout
+      let resolved = false;
+      const done = () => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(forceKillTimeout);
+        resolve();
+      };
+
+      proc.kill("SIGTERM");
+
       const forceKillTimeout = setTimeout(() => {
-        if (process.killed === false) {
-          logStreamWarning(
-            this.streamId,
-            "Force killing offline stream process"
-          );
-          process.kill("SIGKILL");
+        logStreamWarning(
+          this.streamId,
+          "Force killing offline stream process"
+        );
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* already dead */
         }
+        done();
       }, config.process.shutdownTimeout);
 
-      process.on("exit", () => {
-        clearTimeout(forceKillTimeout);
+      proc.once("exit", () => {
         logStreamEvent(this.streamId, "Offline stream stopped");
-        resolve();
+        done();
       });
     });
   }
 
-  /**
-   * Stop all FFmpeg processes
-   */
   async stopAll(): Promise<void> {
     this.isShuttingDown = true;
     await Promise.all([this.stopLiveStream(), this.stopOfflineStream()]);
+    this.isShuttingDown = false;
   }
 
-  /**
-   * Check if any process is running
-   */
   isRunning(): boolean {
     return this.liveProcess !== null || this.offlineProcess !== null;
   }
 
-  /**
-   * Mask sensitive parts of URLs for logging
-   */
+  private redactOutput(output: string): string {
+    return output
+      .replace(/rtsp:\/\/[^\s@]*@/g, "rtsp://****:****@")
+      .replace(/\/live2\/[^\s"')]+/g, "/live2/****");
+  }
+
   private maskUrl(url: string): string {
-    // Mask password in RTSP URLs
     let masked = url.replace(/:([^@:]+)@/, ":****@");
-
-    // Mask stream key in YouTube URLs
     masked = masked.replace(/\/live2\/([^/]+)$/, "/live2/****");
-
     return masked;
   }
 }

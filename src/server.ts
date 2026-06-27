@@ -3,12 +3,15 @@
  * Main entry point - manages multiple stream instances with automatic failover
  */
 
+import "dotenv/config";
 import { StreamManager } from "./StreamManager.js";
+import { CombinedStreamManager } from "./CombinedStreamManager.js";
 import logger from "./logger.js";
 import config from "./config.js";
 
 // Store stream managers
 const streamManagers: StreamManager[] = [];
+let combinedManager: CombinedStreamManager | null = null;
 
 // Track shutdown state
 let isShuttingDown = false;
@@ -54,6 +57,28 @@ async function startServer(): Promise<void> {
 
   await Promise.all(startPromises);
 
+  if (config.combined) {
+    combinedManager = new CombinedStreamManager(config.combined, streamManagers);
+
+    for (const manager of streamManagers) {
+      manager.onStateChange = (oldState, newState) => {
+        if (combinedManager) {
+          const managerId = manager["id"];
+          combinedManager.handleCameraStateChange(managerId, oldState, newState);
+        }
+      };
+    }
+
+    try {
+      await combinedManager.start();
+    } catch (error) {
+      logger.error("Failed to start combined stream", {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+    }
+  }
+
   logger.info("All streams initialized");
   logger.info("=".repeat(60));
 
@@ -67,9 +92,11 @@ async function startServer(): Promise<void> {
  * Log current status of all streams
  */
 function logStatus(): void {
-  logger.info("Stream Status Report", {
-    streams: streamManagers.map((m) => m.getStatus()),
-  });
+  const statuses = streamManagers.map((m) => m.getStatus());
+  if (combinedManager) {
+    statuses.push(combinedManager.getStatus());
+  }
+  logger.info("Stream Status Report", { streams: statuses });
 }
 
 /**
@@ -98,7 +125,7 @@ async function shutdown(signal: string): Promise<void> {
     // Stop all stream managers
     logger.info("Stopping all stream managers...");
 
-    const stopPromises = streamManagers.map(async (manager) => {
+    const stopPromises: Promise<void>[] = streamManagers.map(async (manager) => {
       try {
         await manager.stop();
         logger.info(`Stopped stream manager: ${manager["id"]}`);
@@ -108,6 +135,16 @@ async function shutdown(signal: string): Promise<void> {
         });
       }
     });
+
+    if (combinedManager) {
+      stopPromises.push(
+        combinedManager.stop().catch((error) => {
+          logger.error("Error stopping combined stream", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        })
+      );
+    }
 
     // Wait for all streams to stop with timeout
     await Promise.race([

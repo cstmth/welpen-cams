@@ -1,12 +1,22 @@
-/**
- * Type definitions for the RTSP to YouTube Stream Relay
- */
-
 export interface StreamConfig {
   id: string;
   name: string;
   rtsp: string;
   youtube: string;
+}
+
+export interface CombinedStreamConfig {
+  id: string;
+  name: string;
+  youtube: string;
+  imagePath?: string;
+  tileWidth: number;
+  tileHeight: number;
+  // Constant frame rate each input is normalized to before stacking. Match the
+  // camera source fps to avoid duplicate/drop churn in the composite.
+  framerate: number;
+  inputOptions: string[];
+  outputOptions: string[];
 }
 
 export interface MonitoringConfig {
@@ -25,27 +35,15 @@ export interface RetryConfig {
 }
 
 export interface FFmpegLiveConfig {
-  rtspTransport: string;
-  videoCodec: string;
-  audioCodec: string;
-  audioBitrate: string;
-  format: string;
   inputOptions: string[];
   outputOptions: string[];
 }
 
 export interface FFmpegOfflineConfig {
-  width: number;
-  height: number;
+  imagePath: string;
   framerate: number;
-  videoCodec: string;
-  videoBitrate: string;
-  preset: string;
-  text: string;
-  fontSize: number;
-  fontColor: string;
-  backgroundColor: string;
-  format: string;
+  inputOptions: string[];
+  outputOptions: string[];
 }
 
 export interface FFmpegConfig {
@@ -80,16 +78,32 @@ export interface ProcessConfig {
 }
 
 export interface StreamingConfig {
-  restartInterval: number;
+  // Delay before reconnecting to the same YouTube URL, so YouTube releases the
+  // previous ingestion and does not report a duplicate stream (milliseconds)
+  reconnectDelay: number;
+}
+
+export interface DiagnosticsConfig {
+  // Parse FFmpeg -progress output and log per-stream connection/throughput stats
+  statsEnabled: boolean;
+  // How often FFmpeg emits a progress snapshot (seconds)
+  statsPeriod: number;
+  // How often an aggregated connection-quality summary is logged (seconds)
+  reportInterval: number;
+  // Restart the stream when a stall is detected (no frames forwarded within a
+  // report window). Requires statsEnabled.
+  restartOnStall: boolean;
 }
 
 export interface Config {
   streams: StreamConfig[];
+  combined: CombinedStreamConfig | null;
   monitoring: MonitoringConfig;
   retry: RetryConfig;
   ffmpeg: FFmpegConfig;
   logging: LoggingConfig;
   streaming: StreamingConfig;
+  diagnostics: DiagnosticsConfig;
   process: ProcessConfig;
 }
 
@@ -112,7 +126,3 @@ export interface StreamStatus {
   hasOfflineProcess: boolean;
 }
 
-export interface FrameComparisonResult {
-  similarity: number;
-  isFrozen: boolean;
-}

@@ -1,0 +1,35 @@
+# MediaMTX local ingest relay for the Welpen cameras (TEMPLATE).
+#
+# The CAMERA_*_RTSP base URLs and STREAM_QUALITY placeholders are substituted
+# from the environment by mediamtx/render-mediamtx.mjs into
+# mediamtx/mediamtx.runtime.yml before MediaMTX starts.
+
+logLevel: info
+
+# Larger per-reader write queue so a momentarily slow reader (e.g. the combined
+# encoder under load) does not get its frames discarded / connection reset.
+writeQueueSize: 2048
+
+# Restrict the RTSP server (loopback readers) to TCP.
+rtspTransports: [tcp]
+
+paths:
+  camera-1:
+    source: ${CAMERA_1_RTSP}/h264Preview_01_${STREAM_QUALITY}
+    rtspTransport: tcp
+    sourceOnDemand: no
+
+  camera-2:
+    source: ${CAMERA_2_RTSP}/h264Preview_01_${STREAM_QUALITY}
+    rtspTransport: tcp
+    sourceOnDemand: no
+
+  camera-3:
+    source: ${CAMERA_3_RTSP}/h264Preview_01_${STREAM_QUALITY}
+    rtspTransport: tcp
+    sourceOnDemand: no
+
+  camera-4:
+    source: ${CAMERA_4_RTSP}/h264Preview_01_${STREAM_QUALITY}
+    rtspTransport: tcp
+    sourceOnDemand: no

@@ -21,6 +21,11 @@ temp/
 .env.local
 .env.*.local
 
+# MediaMTX rendered config (contains credentials) and auto-generated TLS certs
+mediamtx/mediamtx.runtime.yml
+auto.crt
+auto.key
+
 # IDE
 .vscode/
 .idea/
@@ -32,11 +37,3 @@ temp/
 .DS_Store
 Thumbs.db
 
-# Optional: Uncomment if you want to ignore config.ts (contains sensitive data)
-# src/config.ts
-
-# Old JavaScript files (if migrating)
-config.js
-server.js
-src/**/*.js
-!src/**/*.d.ts

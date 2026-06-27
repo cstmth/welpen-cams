@@ -1,153 +1,256 @@
-/**
- * Configuration for RTSP to YouTube Stream Relay
- */
-
 import type { Config } from "./types.js";
 
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+const TRUTHY = new Set(["1", "true", "yes", "on"]);
+const useLocalRelay = TRUTHY.has(
+  (process.env.USE_LOCAL_RELAY ?? "").toLowerCase()
+);
+const relayBaseUrl = (
+  process.env.LOCAL_RELAY_URL ?? "rtsp://localhost:8554"
+).replace(/\/+$/, "");
+
+// ── Stream quality ──────────────────────────────────────────────────────────
+const streamQuality = (
+  process.env.STREAM_QUALITY ?? "sub"
+).toLowerCase() as "sub" | "main";
+const streamPath = `h264Preview_01_${streamQuality}`;
+const isMain = streamQuality === "main";
+
+function cameraRtsp(id: string, envName: string): string {
+  const baseUrl = requireEnv(envName).replace(/\/+$/, "");
+  const fullUrl = `${baseUrl}/${streamPath}`;
+  return useLocalRelay ? `${relayBaseUrl}/${id}` : fullUrl;
+}
+
+// ── Video encoder ───────────────────────────────────────────────────────────
+// "libx264"             — CPU, works everywhere (default)
+// "h264_qsv"            — Intel Quick Sync (DS224+, NAS with Intel iGPU)
+// "h264_videotoolbox"   — macOS hardware encoder
+const videoEncoder = (process.env.VIDEO_ENCODER ?? "libx264").toLowerCase();
+
+function videoEncodeOpts(bitrate: string, bufsize: string): string[] {
+  const opts = [
+    "-c:v",
+    videoEncoder,
+    "-pix_fmt",
+    "yuv420p",
+    "-b:v",
+    bitrate,
+    "-maxrate",
+    bitrate,
+    "-minrate",
+    bitrate,
+    "-bufsize",
+    bufsize,
+  ];
+
+  if (videoEncoder === "libx264") {
+    opts.push("-preset", "veryfast", "-tune", "zerolatency");
+  } else if (videoEncoder === "h264_qsv") {
+    opts.push("-preset", "veryfast");
+  } else if (videoEncoder === "h264_videotoolbox") {
+    opts.push("-realtime", "true");
+  }
+
+  return opts;
+}
+
+// ── Quality-dependent presets ───────────────────────────────────────────────
+const liveVideoBitrate = isMain ? "4000k" : "1500k";
+const liveBufsize = isMain ? "8000k" : "3000k";
+const combinedTileWidth = isMain ? 1440 : 960;
+const combinedTileHeight = isMain ? 808 : 540;
+const combinedVideoBitrate = isMain ? "6000k" : "3000k";
+const combinedBufsize = isMain ? "12000k" : "6000k";
+const combinedFramerate = 10;
+
+const rtspInputOptions = [
+  "-rtsp_transport",
+  "tcp",
+  "-rtsp_flags",
+  "prefer_tcp",
+  "-analyzeduration",
+  "10000000",
+  "-probesize",
+  "10000000",
+  "-fflags",
+  "+genpts+discardcorrupt",
+  "-use_wallclock_as_timestamps",
+  "1",
+  "-rtbufsize",
+  "16M",
+];
+
+const combinedInputOptions = [
+  "-thread_queue_size",
+  "512",
+  "-rtsp_transport",
+  "tcp",
+  "-rtsp_flags",
+  "prefer_tcp",
+  "-analyzeduration",
+  "10000000",
+  "-probesize",
+  "10000000",
+  "-fflags",
+  "+genpts+discardcorrupt",
+  "-rtbufsize",
+  "16M",
+];
+
+const flvOutputOptions = [
+  "-f",
+  "flv",
+  "-flvflags",
+  "no_duration_filesize",
+  "-rtmp_live",
+  "live",
+];
+
+const combinedYoutube = process.env.COMBINED_YOUTUBE;
+
 const config: Config = {
-  // Stream definitions
   streams: [
     {
       id: "camera-1",
       name: "Camera 1",
-      rtsp: "rtsp://admin:Carli2907@192.168.178.90:554/h264Preview_01_main",
-      youtube: "rtmp://a.rtmp.youtube.com/live2/mvs6-7b44-4qd0-agc6-bere",
+      rtsp: cameraRtsp("camera-1", "CAMERA_1_RTSP"),
+      youtube: requireEnv("CAMERA_1_YOUTUBE"),
     },
     {
       id: "camera-2",
       name: "Camera 2",
-      rtsp: "rtsp://admin:Carli2907@192.168.178.91:554/h264Preview_01_main",
-      youtube: "rtmp://a.rtmp.youtube.com/live2/cgk4-hd82-epwm-xzja-c6qj",
+      rtsp: cameraRtsp("camera-2", "CAMERA_2_RTSP"),
+      youtube: requireEnv("CAMERA_2_YOUTUBE"),
     },
     {
       id: "camera-3",
       name: "Camera 3",
-      rtsp: "rtsp://admin:Carli2907@192.168.178.92:554/h264Preview_01_main",
-      youtube: "rtmp://a.rtmp.youtube.com/live2/5xxa-fb56-zqyk-1wus-5wym",
+      rtsp: cameraRtsp("camera-3", "CAMERA_3_RTSP"),
+      youtube: requireEnv("CAMERA_3_YOUTUBE"),
+    },
+    {
+      id: "camera-4",
+      name: "Camera 4",
+      rtsp: cameraRtsp("camera-4", "CAMERA_4_RTSP"),
+      youtube: requireEnv("CAMERA_4_YOUTUBE"),
     },
   ],
 
-  // Stream monitoring settings
+  combined: combinedYoutube
+    ? {
+        id: "combined",
+        name: "Combined View",
+        youtube: combinedYoutube,
+        imagePath: process.env.COMBINED_IMAGE_PATH,
+        tileWidth: combinedTileWidth,
+        tileHeight: combinedTileHeight,
+        framerate: combinedFramerate,
+        inputOptions: combinedInputOptions,
+        outputOptions: [
+          "-af",
+          "volume=0.001",
+          ...videoEncodeOpts(combinedVideoBitrate, combinedBufsize),
+          "-r",
+          String(combinedFramerate),
+          "-g",
+          String(combinedFramerate * 2),
+          "-c:a",
+          "aac",
+          "-b:a",
+          "128k",
+          "-ar",
+          "44100",
+          "-ac",
+          "2",
+          ...flvOutputOptions,
+        ],
+      }
+    : null,
+
   monitoring: {
-    // Interval between frame captures for comparison (milliseconds)
-    checkInterval: 10000, // 10 seconds
-
-    // Similarity threshold to consider stream as frozen (0-1)
-    // 0.999 means 99.9% similarity triggers offline detection
+    checkInterval: 120000,
     similarityThreshold: 0.999,
-
-    // Resolution for frame capture (lower = faster comparison)
     captureWidth: 320,
     captureHeight: 240,
-
-    // Number of consecutive frozen checks before marking as offline
-    consecutiveFailures: 1,
+    consecutiveFailures: 2,
   },
 
-  // Retry logic settings
   retry: {
-    // Maximum number of retry attempts before switching to placeholder
     maxAttempts: 5,
-
-    // Initial retry delay in milliseconds
-    initialDelay: 5000, // 5 seconds
-
-    // Maximum retry delay in milliseconds
-    maxDelay: 80000, // 80 seconds
-
-    // Multiplier for exponential backoff
+    initialDelay: 5000,
+    maxDelay: 80000,
     backoffMultiplier: 2,
   },
 
-  // FFmpeg settings for live streaming
   ffmpeg: {
     live: {
-      // RTSP transport protocol
-      rtspTransport: "tcp",
-
-      // Video codec (copy = no re-encoding)
-      videoCodec: "copy",
-
-      // Audio codec
-      audioCodec: "aac",
-
-      // Audio bitrate
-      audioBitrate: "128k",
-
-      // Output format
-      format: "flv",
-
-      // Additional input options
-      inputOptions: ["-rtsp_transport tcp"],
-
-      // Additional output options
+      inputOptions: rtspInputOptions,
       outputOptions: [
-        "-c:v copy",
-        "-c:a aac",
-        "-b:a 128k",
-        "-f flv",
-        "-reconnect 1",
-        "-reconnect_streamed 1",
-        "-reconnect_delay_max 5",
+        ...videoEncodeOpts(liveVideoBitrate, liveBufsize),
+        "-force_key_frames",
+        "expr:gte(t,n_forced*2)",
+        "-af",
+        "aresample=async=1:first_pts=0,volume=0.001",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-max_muxing_queue_size",
+        "1024",
+        ...flvOutputOptions,
       ],
     },
 
-    // Settings for offline placeholder stream
     offline: {
-      // Video resolution
-      width: 1920,
-      height: 1080,
-
-      // Frame rate
+      imagePath: process.env.OFFLINE_IMAGE_PATH ?? "./assets/offline.png",
       framerate: 30,
-
-      // Video codec
-      videoCodec: "libx264",
-
-      // Video bitrate
-      videoBitrate: "2500k",
-
-      // Encoding preset
-      preset: "veryfast",
-
-      // Text to display
-      text: "Stream ist offline",
-
-      // Text styling
-      fontSize: 60,
-      fontColor: "white",
-      backgroundColor: "black",
-
-      // Output format
-      format: "flv",
+      inputOptions: ["-re", "-loop", "1"],
+      outputOptions: [
+        "-af",
+        "volume=0.001",
+        ...videoEncodeOpts("2500k", "5000k"),
+        "-g",
+        "60",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        ...flvOutputOptions,
+      ],
     },
   },
 
-  // Logging configuration
   logging: {
-    // Log level: 'error', 'warn', 'info', 'debug'
-    level: "debug", // DIAGNOSTIC: Temporarily set to debug for troubleshooting
-
-    // Console logging
+    level: (process.env.LOG_LEVEL ?? "info") as string,
     console: {
       enabled: true,
       colorize: true,
     },
-
-    // File logging
     file: {
       enabled: true,
       directory: "./logs",
-
-      // Combined log (all levels)
       combined: {
         filename: "combined-%DATE%.log",
         datePattern: "YYYY-MM-DD",
         maxSize: "20m",
         maxFiles: "14d",
       },
-
-      // Error log (errors only)
       error: {
         filename: "error-%DATE%.log",
         datePattern: "YYYY-MM-DD",
@@ -157,20 +260,19 @@ const config: Config = {
     },
   },
 
-  // Stream restart settings
   streaming: {
-    // Interval for automatic stream restarts (milliseconds)
-    // Set to 0 to disable automatic restarts
-    // Default: 300000ms (5 minutes)
-    restartInterval: 300000,
+    reconnectDelay: 5000,
   },
 
-  // Process management
-  process: {
-    // Grace period for FFmpeg process shutdown (milliseconds)
-    shutdownTimeout: 5000,
+  diagnostics: {
+    statsEnabled: true,
+    statsPeriod: 5,
+    reportInterval: 30,
+    restartOnStall: true,
+  },
 
-    // Force kill timeout if graceful shutdown fails (milliseconds)
+  process: {
+    shutdownTimeout: 5000,
     forceKillTimeout: 10000,
   },
 };

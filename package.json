@@ -7,7 +7,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
+    "start:all": "npm run build && ./mediamtx/start-with-relay.sh",
     "dev": "tsx watch src/server.ts",
+    "dev:all": "./mediamtx/start-with-relay.sh npm run dev",
     "clean": "rm -rf dist",
     "prebuild": "npm run clean",
     "type-check": "tsc --noEmit"
@@ -23,6 +25,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "dotenv": "^16.4.0",
     "fluent-ffmpeg": "^2.1.2",
     "winston": "^3.11.0",
     "winston-daily-rotate-file": "^4.7.1",

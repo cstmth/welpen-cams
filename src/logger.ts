@@ -7,11 +7,7 @@ import winston from "winston";
 import DailyRotateFile from "winston-daily-rotate-file";
 import path from "path";
 import fs from "fs";
-// import { fileURLToPath } from "url";
 import config from "./config.js";
-
-// const __filename = fileURLToPath(import.meta.url);
-// const __dirname = path.dirname(__filename);
 
 // Ensure logs directory exists
 const logsDir = config.logging.file.directory;
@@ -65,7 +61,7 @@ if (config.logging.file.enabled) {
       maxSize: config.logging.file.combined.maxSize,
       maxFiles: config.logging.file.combined.maxFiles,
       format: fileFormat,
-      level: config.logging.level,
+      level: "debug",
     })
   );
 

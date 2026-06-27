@@ -1,265 +1,174 @@
 # RTSP to YouTube Stream Relay
 
-A robust TypeScript Node.js server that relays RTSP surveillance camera streams to YouTube Live with automatic offline detection and failover to placeholder streams.
+Relays RTSP surveillance camera streams to YouTube Live via Docker. Monitors stream health, automatically switches to an offline placeholder when cameras drop, and recovers when they come back. Runs on a Synology DS224+ or any Docker host with an Intel iGPU.
 
 ## Features
 
-- **Multi-Stream Support**: Simultaneously relay three RTSP camera streams to YouTube
-- **Automatic Offline Detection**: Monitors stream health by comparing frames every 10 seconds
-- **Smart Failover**: Automatically switches to "Stream ist offline" placeholder when cameras go offline
-- **Automatic Recovery**: Seamlessly switches back to live stream when cameras come back online
-- **Retry Logic**: Exponential backoff retry mechanism for connection failures
-- **Memory Safe**: Proper FFmpeg process management prevents memory leaks
-- **Comprehensive Logging**: Console and file logging with daily rotation
-- **Graceful Shutdown**: Properly terminates all processes on exit
+- **4 individual camera streams** re-encoded with forced 2-second keyframes
+- **Combined 2x2 grid stream** (optional)
+- **Automatic offline detection** via real-time FFmpeg progress monitoring + frame comparison
+- **Offline placeholder** using a custom PNG image
+- **Auto-recovery** when cameras come back online
+- **Retry with exponential backoff**
+- **Intel Quick Sync** hardware encoding support (h264_qsv)
+- **Local ingest relay** (MediaMTX) — each camera pulled once, all consumers read from loopback
 
-## How It Works
-
-1. **Live Streaming**: FFmpeg relays RTSP streams directly to YouTube (video copy, no re-encoding)
-2. **Health Monitoring**: Captures frames every 10 seconds and compares them
-3. **Offline Detection**: If frames are >99.9% similar (frozen stream), triggers offline state
-4. **Retry Mechanism**: Attempts to reconnect 5 times with exponential backoff (5s, 10s, 20s, 40s, 80s)
-5. **Placeholder Stream**: If retries fail, switches to generated "Stream ist offline" video
-6. **Auto Recovery**: Continues monitoring and automatically switches back when stream recovers
-
-## Prerequisites
-
-- **Node.js**: Version 18.0.0 or higher
-- **TypeScript**: Installed automatically with dependencies
-- **FFmpeg**: Must be installed and available in system PATH
-  - Ubuntu/Debian: `sudo apt-get install ffmpeg`
-  - macOS: `brew install ffmpeg`
-  - Windows: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
-
-## Installation
-
-1. Clone or download this repository
-
-2. Install dependencies:
+## Quick Start
 
 ```bash
-npm install
+git clone <repo-url> welpen-2
+cd welpen-2
+
+cp .env.example .env
+nano .env                        # Fill in camera URLs + YouTube stream keys
+
+# Place your offline placeholder image
+# assets/offline.png             (required)
+# assets/tile.png                (optional, only for <4 cameras in combined)
+
+docker compose up -d --build     # Build image + start
+docker compose logs -f           # View logs
 ```
 
-3. Configure your streams in [`config.js`](config.js):
+## Commands
 
-```javascript
-streams: [
-  {
-    id: "camera-1",
-    name: "Camera 1",
-    rtsp: "rtsp://username:password@192.168.1.100:554/stream",
-    youtube: "rtmp://a.rtmp.youtube.com/live2/your-stream-key",
-  },
-  // Add more streams...
-];
+```bash
+docker compose up -d --build     # Build + start
+docker compose down              # Stop
+docker compose restart           # Restart
+docker compose logs -f           # Follow logs
+docker compose exec welpen-relay bash          # Shell into container
+docker compose exec welpen-relay vainfo        # Verify QSV GPU access
 ```
 
 ## Configuration
 
-All configuration is in [`src/config.ts`](src/config.ts):
+Everything is configured via `.env`:
 
-### Stream Settings
+### Cameras
 
-- `streams`: Array of stream configurations (RTSP source and YouTube destination)
+| Variable | Required | Description |
+|---|---|---|
+| `CAMERA_1_RTSP` | Yes | Base URL without stream path, e.g. `rtsp://user:pass@192.168.1.100:554` |
+| `CAMERA_1_YOUTUBE` | Yes | YouTube RTMP URL |
+| `CAMERA_2_RTSP` … `CAMERA_4_YOUTUBE` | Yes | Same for cameras 2-4 |
+| `COMBINED_YOUTUBE` | No | YouTube RTMP URL for the 2x2 grid stream. Remove to disable. |
 
-### Monitoring Settings
+### Encoding
 
-- `checkInterval`: Time between health checks (default: 10000ms)
-- `similarityThreshold`: Frame similarity to trigger offline (default: 0.999 = 99.9%)
-- `captureWidth/Height`: Resolution for frame comparison (default: 320x240)
+| Variable | Default | Description |
+|---|---|---|
+| `STREAM_QUALITY` | `sub` | `sub` (~896x512, low bandwidth) or `main` (~2880x1616, needs Ethernet) |
+| `VIDEO_ENCODER` | `libx264` | `libx264` (CPU) or `h264_qsv` (Intel Quick Sync hardware encoding) |
+| `LOG_LEVEL` | `info` | Console log level. File logs always capture `debug`. |
 
-### Retry Settings
+### Stream Quality
 
-- `maxAttempts`: Maximum retry attempts before placeholder (default: 5)
-- `initialDelay`: First retry delay (default: 5000ms)
-- `maxDelay`: Maximum backoff delay (default: 80000ms)
-- `backoffMultiplier`: Exponential backoff multiplier (default: 2)
+| | `sub` (default) | `main` |
+|---|---|---|
+| Resolution | ~896x512 | ~2880x1616 |
+| Source fps | 10 | 20 |
+| WiFi bandwidth / camera | ~0.5 Mbit/s | ~4-8 Mbit/s |
+| Individual bitrate | 1,500 kbps | 4,000 kbps |
+| Combined output | 1920x1080 @ 10fps, 3 Mbps | 2880x1616 @ 10fps, 6 Mbps |
+| CPU load (libx264) | Low | High |
 
-### FFmpeg Settings
+**Use `sub` over WiFi.** `main` requires Ethernet-connected cameras.
 
-- **Live Stream**: Video copy (no re-encoding), AAC audio at 128k
-- **Offline Placeholder**: 1920x1080 @ 30fps, H.264 at 2500k
+### Video Encoder
 
-### Logging Settings
+| Encoder | CPU usage | Notes |
+|---|---|---|
+| `libx264` | High | Works everywhere |
+| `h264_qsv` | Very low | Requires Intel iGPU + `/dev/dri` (DS224+ has this) |
 
-- `level`: Log level (error, warn, info, debug)
-- `console`: Console logging with colors
-- `file`: Daily rotating file logs (14 days combined, 30 days errors)
+Hardware encoding reduces CPU from ~40% to ~5-10%. The `docker-compose.yml` passes `/dev/dri` through automatically. Verify with `docker compose exec welpen-relay vainfo`.
 
-## Usage
+## How It Works
 
-### Start the Server
+### Architecture
 
-```bash
-npm start
+```
+                WiFi (1x per camera)        loopback (local)
+Camera 1..4  ────────────────────►  MediaMTX  ──────────────►  FFmpeg encoders
+                                                                ├── Camera 1 → YouTube
+                                                                ├── Camera 2 → YouTube
+                                                                ├── Camera 3 → YouTube
+                                                                ├── Camera 4 → YouTube
+                                                                └── Combined  → YouTube
 ```
 
-Or for development:
+Each camera is pulled **once** by the bundled MediaMTX relay. All FFmpeg encoders read from loopback — no duplicate WiFi load.
 
-```bash
-node server.js
-```
+### Health Monitoring
 
-### Stop the Server
+1. **StreamStats** (primary): Parses FFmpeg `-progress` output every 30 seconds. Detects stalls (no frames forwarded) and triggers automatic restart.
+2. **StreamMonitor** (secondary): Captures and compares frames every 2 minutes. Catches frozen streams where FFmpeg still forwards identical frames.
+3. **Orphaned state check**: Detects when state=LIVE but the FFmpeg process has silently exited.
 
-Press `Ctrl+C` or send SIGTERM signal. The server will gracefully shut down all streams.
+### Failover
 
-### Monitor Logs
+1. Stream fails → retry with exponential backoff (5s, 10s, 20s, 40s, 80s)
+2. 5 retries exhausted → switch to offline placeholder PNG
+3. Continue monitoring → auto-switch back to live when camera recovers
 
-Logs are written to:
+### RTSP Robustness
 
-- **Console**: Real-time colored output
-- **Files**: `./logs/` directory
-  - `combined-YYYY-MM-DD.log`: All log levels
-  - `error-YYYY-MM-DD.log`: Errors only
+- TCP transport with `prefer_tcp`
+- `+genpts+discardcorrupt` for broken timestamps/corrupt packets
+- `use_wallclock_as_timestamps` for stable timing
+- 16 MB receive buffer
+- `analyzeduration`/`probesize` 10s for cameras with unusual H264 packetization
+
+### YouTube Compliance
+
+- Forced keyframe every 2 seconds (`force_key_frames`)
+- Audio resampled from camera's 16 kHz mono to 44.1 kHz stereo AAC
+- Audio nearly silent (`volume=0.001`, -60 dB)
+- 5-second reconnect delay to avoid YouTube's duplicate-ingestion error
 
 ## Project Structure
 
 ```
-welpen-cams-2/
-├── src/
-│   ├── server.ts             # Main entry point
-│   ├── config.ts             # Configuration
-│   ├── types.ts              # TypeScript type definitions
-│   ├── StreamManager.ts      # Stream lifecycle management
-│   ├── StreamMonitor.ts      # Health monitoring & frame comparison
-│   ├── FFmpegManager.ts      # FFmpeg process management
-│   └── logger.ts             # Winston logging setup
-├── dist/                     # Compiled JavaScript (auto-generated)
-├── logs/                     # Log files (auto-created)
-├── temp/                     # Temporary frame captures (auto-created)
-├── package.json              # Dependencies and scripts
-├── tsconfig.json             # TypeScript configuration
-├── ARCHITECTURE.md           # Detailed architecture documentation
-└── README.md                 # This file
+src/
+  server.ts               Entry point, signal handling, lifecycle
+  config.ts               All configuration, reads from .env
+  types.ts                TypeScript interfaces and enums
+  StreamManager.ts        Single-camera stream lifecycle and state machine
+  StreamMonitor.ts        Frame capture and comparison for offline detection
+  StreamStats.ts          Connection quality diagnostics and stall detection
+  CombinedStreamManager.ts  Combined 2x2 grid stream lifecycle
+  FFmpegManager.ts        FFmpeg process spawning, shutdown, and cleanup
+  logger.ts               Winston logging setup with daily rotation
+mediamtx/
+  mediamtx.template.yml   MediaMTX config template (no credentials)
+  start-with-relay.sh     Starts MediaMTX + Node server together
+  render-mediamtx.mjs     Substitutes env vars into the template
+assets/
+  offline.png             Offline placeholder image (user-provided)
+  tile.png                Optional 4th-quadrant image (user-provided)
+Dockerfile                Multi-stage build (Node + FFmpeg + QSV + MediaMTX)
+docker-compose.yml        One-command deploy with GPU passthrough
+.env                      Stream credentials (not committed)
+.env.example              Template for .env
 ```
-
-## Architecture
-
-The system uses a modular TypeScript architecture with clear separation of concerns:
-
-- **StreamManager**: Manages stream lifecycle and state transitions
-- **StreamMonitor**: Captures and compares frames for health checks
-- **FFmpegManager**: Handles FFmpeg process creation and termination
-- **Logger**: Centralized logging with Winston
-- **Types**: Comprehensive TypeScript type definitions for type safety
-
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for detailed documentation.
 
 ## Troubleshooting
 
-### FFmpeg Not Found
+**Container exits immediately** -- Check `docker compose logs`. Usually a missing `.env` variable.
 
-```
-Error: spawn ffmpeg ENOENT
-```
+**RTSP connection refused** -- Verify camera IPs are reachable from the Docker host. Test with `docker compose exec welpen-relay ffmpeg -rtsp_transport tcp -i "rtsp://..." -t 5 -f null -`.
 
-**Solution**: Install FFmpeg and ensure it's in your system PATH.
+**YouTube not going live** -- Verify stream keys in `.env`. Ensure live streaming is enabled on the YouTube channel.
 
-### RTSP Connection Failed
+**Stream frozen / smeary** -- Weak camera WiFi. Check logs for `Connection stalled` or `Connection degraded`. Use `STREAM_QUALITY=sub`. Consider wiring cameras via Ethernet.
 
-```
-Failed to start live stream: Connection refused
-```
+**High CPU** -- Set `VIDEO_ENCODER=h264_qsv` for hardware encoding. Verify QSV works: `docker compose exec welpen-relay vainfo`.
 
-**Solutions**:
+**QSV not working** -- Check `/dev/dri` exists on the host (`ls /dev/dri/`). On Synology, the Intel i915 driver must be loaded in the DSM kernel.
 
-- Verify RTSP URL is correct
-- Check camera is online and accessible
-- Verify username/password
-- Check firewall settings
-
-### YouTube Connection Issues
-
-```
-FFmpeg: Connection to tcp://a.rtmp.youtube.com:1935 failed
-```
-
-**Solutions**:
-
-- Verify YouTube stream key is correct
-- Check YouTube Live is enabled on your account
-- Ensure stream is scheduled/active in YouTube Studio
-- Check internet connection and firewall
-
-### High CPU Usage
-
-**Causes**:
-
-- Multiple streams encoding simultaneously
-- High resolution offline placeholders
-
-**Solutions**:
-
-- Use video copy for live streams (already default)
-- Reduce offline placeholder resolution in config
-- Use faster FFmpeg preset (already using 'veryfast')
-
-### Memory Leaks
-
-The system is designed to prevent memory leaks:
-
-- All FFmpeg processes are properly terminated
-- Event listeners are cleaned up
-- Frame buffers are released after comparison
-- Temporary files are deleted
-
-If you suspect a memory leak:
-
-1. Check logs for unclosed processes
-2. Monitor with `htop` or Task Manager
-3. Restart the server if necessary
-
-## Performance
-
-**Typical Resource Usage** (per stream):
-
-- **CPU**: 5-10% (live streaming), 15-20% (offline placeholder)
-- **Memory**: 50-150 MB per FFmpeg process
-- **Network**: 2.5-3 Mbps upload to YouTube
-
-**Scaling**:
-
-- Tested with 3 simultaneous streams
-- Can handle more streams with adequate hardware
-- Each stream runs independently
-
-## Security Considerations
-
-⚠️ **Important**: The configuration file contains sensitive information:
-
-- RTSP credentials (username/password)
-- YouTube stream keys
-
-**Recommendations**:
-
-1. Use environment variables for credentials
-2. Restrict file permissions: `chmod 600 config.js`
-3. Don't commit `config.js` to public repositories
-4. Use `.gitignore` to exclude sensitive files
+**Duplicate ingestion warning on YouTube** -- A previous stream session hasn't expired yet. The server waits 5 seconds before reconnecting; if the warning persists, increase `reconnectDelay` in `src/config.ts`.
 
 ## License
 
 ISC
-
-## Support
-
-For issues or questions:
-
-1. Check the logs in `./logs/` directory
-2. Review [`ARCHITECTURE.md`](ARCHITECTURE.md) for system details
-3. Verify FFmpeg is working: `ffmpeg -version`
-4. Test RTSP streams: `ffplay rtsp://your-camera-url`
-
-## Changelog
-
-### Version 1.0.0
-
-- Initial release
-- Multi-stream RTSP to YouTube relay
-- Automatic offline detection and failover
-- Retry logic with exponential backoff
-- Automatic recovery
-- Comprehensive logging
-- Graceful shutdown handling
