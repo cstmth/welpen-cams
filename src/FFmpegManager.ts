@@ -101,8 +101,10 @@ export class FFmpegManager {
       // Normalize each input to a constant fps first, so the 4 tiles stay frame
       // synchronized for hstack/vstack (independent live inputs otherwise drift
       // and cause drop/duplicate churn in the composite).
+      // We use RTCTIME - RTCSTART to assign wallclock timestamps, which instantly
+      // fast-forwards and drops any backlog built up during FFmpeg's sequential input startup.
       const scaleFilter = (i: number) =>
-        `[${i}:v]fps=${framerate},scale=${tileWidth}:${tileHeight}:force_original_aspect_ratio=decrease,` +
+        `[${i}:v]setpts='(RTCTIME - RTCSTART) / (TB * 1000000)',fps=${framerate},scale=${tileWidth}:${tileHeight}:force_original_aspect_ratio=decrease,` +
         `pad=${tileWidth}:${tileHeight}:(ow-iw)/2:(oh-ih)/2,setsar=1[v${i}]`;
 
       const filterParts = [];
