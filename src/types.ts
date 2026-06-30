@@ -3,6 +3,10 @@ export interface StreamConfig {
   name: string;
   rtsp: string;
   youtube: string;
+  // When false, the camera still streams its own YouTube endpoint but shows the
+  // offline placeholder image instead of the RTSP feed, and is excluded from the
+  // combined grid. RTSP is never connected or monitored.
+  enabled: boolean;
 }
 
 export interface CombinedStreamConfig {

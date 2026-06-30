@@ -29,6 +29,32 @@ function cameraRtsp(id: string, envName: string): string {
   return useLocalRelay ? `${relayBaseUrl}/${id}` : fullUrl;
 }
 
+// A camera is enabled unless CAMERA_<n>_ENABLED is explicitly set to a falsy
+// value. A disabled camera still streams its own YouTube endpoint but only the
+// offline placeholder image — its RTSP is never connected, so CAMERA_<n>_RTSP is
+// not required (CAMERA_<n>_YOUTUBE still is).
+function cameraEnabled(n: number): boolean {
+  const value = process.env[`CAMERA_${n}_ENABLED`];
+  if (value === undefined || value === "") return true;
+  return TRUTHY.has(value.toLowerCase());
+}
+
+function buildStreams(): Config["streams"] {
+  const streams: Config["streams"] = [];
+  for (let n = 1; n <= 4; n++) {
+    const id = `camera-${n}`;
+    const enabled = cameraEnabled(n);
+    streams.push({
+      id,
+      name: `Camera ${n}`,
+      rtsp: enabled ? cameraRtsp(id, `CAMERA_${n}_RTSP`) : "",
+      youtube: requireEnv(`CAMERA_${n}_YOUTUBE`),
+      enabled,
+    });
+  }
+  return streams;
+}
+
 // ── Video encoder ───────────────────────────────────────────────────────────
 // "libx264"             — CPU, works everywhere (default)
 // "h264_qsv"            — Intel Quick Sync (DS224+, NAS with Intel iGPU)
@@ -117,32 +143,7 @@ const flvOutputOptions = [
 const combinedYoutube = process.env.COMBINED_YOUTUBE;
 
 const config: Config = {
-  streams: [
-    {
-      id: "camera-1",
-      name: "Camera 1",
-      rtsp: cameraRtsp("camera-1", "CAMERA_1_RTSP"),
-      youtube: requireEnv("CAMERA_1_YOUTUBE"),
-    },
-    {
-      id: "camera-2",
-      name: "Camera 2",
-      rtsp: cameraRtsp("camera-2", "CAMERA_2_RTSP"),
-      youtube: requireEnv("CAMERA_2_YOUTUBE"),
-    },
-    {
-      id: "camera-3",
-      name: "Camera 3",
-      rtsp: cameraRtsp("camera-3", "CAMERA_3_RTSP"),
-      youtube: requireEnv("CAMERA_3_YOUTUBE"),
-    },
-    {
-      id: "camera-4",
-      name: "Camera 4",
-      rtsp: cameraRtsp("camera-4", "CAMERA_4_RTSP"),
-      youtube: requireEnv("CAMERA_4_YOUTUBE"),
-    },
-  ],
+  streams: buildStreams(),
 
   combined: combinedYoutube
     ? {

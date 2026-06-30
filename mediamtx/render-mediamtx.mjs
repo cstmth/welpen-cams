@@ -18,6 +18,21 @@ try {
   process.exit(1);
 }
 
+// A camera is enabled unless CAMERA_<n>_ENABLED is explicitly set to a falsy
+// value (same semantics as src/config.ts). Drop the path block for a disabled
+// camera so its RTSP var is neither required nor relayed by MediaMTX.
+const TRUTHY = new Set(["1", "true", "yes", "on"]);
+function cameraEnabled(n) {
+  const value = process.env[`CAMERA_${n}_ENABLED`];
+  if (value === undefined || value === "") return true;
+  return TRUTHY.has(value.toLowerCase());
+}
+
+template = template.replace(
+  /\n  camera-(\d+):\n(?:    .*\n?)*/g,
+  (block, n) => (cameraEnabled(Number(n)) ? block : "")
+);
+
 const missing = [];
 const rendered = template.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => {
   const value = process.env[name];

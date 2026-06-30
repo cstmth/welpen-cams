@@ -14,6 +14,7 @@ export class StreamManager {
   private name: string;
   private rtspUrl: string;
   private youtubeUrl: string;
+  private enabled: boolean;
 
   private state: StreamState = StreamState.STOPPED;
   private retryCount: number = 0;
@@ -32,6 +33,7 @@ export class StreamManager {
     this.name = streamConfig.name;
     this.rtspUrl = streamConfig.rtsp;
     this.youtubeUrl = streamConfig.youtube;
+    this.enabled = streamConfig.enabled;
 
     this.monitor = new StreamMonitor(this.id, this.rtspUrl);
     this.ffmpeg = new FFmpegManager(this.id);
@@ -51,6 +53,16 @@ export class StreamManager {
 
     logStreamEvent(this.id, "Starting stream manager", { name: this.name });
     this.setState(StreamState.STARTING);
+
+    if (!this.enabled) {
+      logStreamEvent(
+        this.id,
+        "Camera disabled - streaming offline placeholder only (RTSP not connected, excluded from combined)"
+      );
+      await this.startOfflineStream();
+      return;
+    }
+
     await this.startLiveStream();
   }
 
@@ -154,7 +166,8 @@ export class StreamManager {
       this.setState(StreamState.OFFLINE);
       logStreamEvent(this.id, "Offline placeholder started successfully");
 
-      if (!this.monitor["isMonitoring"]) {
+      // A disabled camera must never recover to live, so don't monitor its RTSP.
+      if (this.enabled && !this.monitor["isMonitoring"]) {
         this.monitor.start();
       }
     } catch (error) {
