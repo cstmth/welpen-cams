@@ -97,6 +97,14 @@ export interface DiagnosticsConfig {
   // Restart the stream when a stall is detected (no frames forwarded within a
   // report window). Requires statsEnabled.
   restartOnStall: boolean;
+  // Run FFmpeg's freezedetect filter on every camera source (and on each
+  // camera's tile inside the combined stream's filter_complex) to catch a
+  // visually frozen picture that keeps producing "new" frames - a case
+  // StreamMonitor (periodic snapshot diff) and StreamStats (frame-count
+  // stall) both miss. Restarts the affected stream when triggered.
+  freezeDetectEnabled: boolean;
+  // Minimum seconds of near-zero pixel change before a freeze is confirmed.
+  freezeDetectDuration: number;
 }
 
 export interface Config {

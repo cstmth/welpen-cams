@@ -26,6 +26,13 @@ export class CombinedStreamManager {
   private offlineRetryTimeout: NodeJS.Timeout | null = null;
   private processCheckInterval: NodeJS.Timeout | null = null;
 
+  // Consecutive stall/freeze-triggered restarts (distinct from retryCount,
+  // which tracks connection failures - a stall/freeze restart always
+  // "succeeds" at the FFmpeg level, so retryCount alone never reflects a
+  // combined stream that keeps coming back live but broken).
+  private problemRestartCount: number = 0;
+  private problemCooldownTimeout: NodeJS.Timeout | null = null;
+
   private ffmpeg: FFmpegManager;
 
   constructor(combinedConfig: CombinedStreamConfig, streamManagers: StreamManager[]) {
@@ -37,8 +44,12 @@ export class CombinedStreamManager {
     this.streamConfig = combinedConfig;
     this.ffmpeg = new FFmpegManager(this.id);
 
-    // Restart the combined stream if its FFmpeg process stalls.
-    this.ffmpeg.onLiveStall = () => this.handleStall();
+    // Restart the combined stream if its FFmpeg process stalls or a tile
+    // freezes.
+    this.ffmpeg.onLiveStall = () =>
+      this.handleStreamProblem("Combined stream stalled (no frames forwarded)");
+    this.ffmpeg.onFreezeDetected = (cameraId) =>
+      this.handleStreamProblem(`Frozen tile detected for ${cameraId} in combined stream`);
   }
 
   async start(): Promise<void> {
@@ -75,6 +86,11 @@ export class CombinedStreamManager {
       clearInterval(this.processCheckInterval);
       this.processCheckInterval = null;
     }
+    if (this.problemCooldownTimeout) {
+      clearTimeout(this.problemCooldownTimeout);
+      this.problemCooldownTimeout = null;
+    }
+    this.problemRestartCount = 0;
 
     await this.ffmpeg.stopAll();
 
@@ -103,8 +119,9 @@ export class CombinedStreamManager {
       }
 
       const inputs = liveManagers.map((manager) => {
-        const url = manager["rtspUrl"] || ""; 
+        const url = manager["rtspUrl"] || "";
         return {
+          id: manager.getStatus().id,
           url,
           isOffline: false
         };
@@ -191,20 +208,49 @@ export class CombinedStreamManager {
     }
   }
 
-  private async handleStall(): Promise<void> {
-    if (this.state !== StreamState.LIVE) {
+  // Bare restart, no problem-counting - used for routine layout rebuilds
+  // (handleCameraStateChange) where nothing is actually broken.
+  private async restartCombined(): Promise<void> {
+    this.setState(StreamState.STARTING);
+    this.retryCount = 0;
+    await this.startCombinedStream();
+  }
+
+  // Shared handler for both FFmpegManager.onLiveStall and onFreezeDetected -
+  // both mean "the process is running but the picture isn't healthy," so
+  // they get the same restart-with-eventual-offline-fallback treatment.
+  private async handleStreamProblem(reason: string): Promise<void> {
+    if (this.state !== StreamState.LIVE) return;
+
+    if (this.problemCooldownTimeout) {
+      clearTimeout(this.problemCooldownTimeout);
+      this.problemCooldownTimeout = null;
+    }
+    this.problemRestartCount++;
+
+    if (this.problemRestartCount >= config.retry.maxAttempts) {
+      logStreamWarning(
+        this.id,
+        `${reason} - too many consecutive restarts, switching to offline placeholder`,
+        { problemRestartCount: this.problemRestartCount }
+      );
+      this.problemRestartCount = 0;
+      await this.startOfflineStream();
       return;
     }
 
-    logStreamWarning(
-      this.id,
-      "Combined stream stalled (no frames forwarded) - restarting"
-    );
+    logStreamWarning(this.id, `${reason} - restarting`, {
+      problemRestartCount: this.problemRestartCount,
+    });
+    await this.restartCombined();
 
-    this.setState(StreamState.STARTING);
-    this.retryCount = 0;
-
-    await this.startCombinedStream();
+    // Only count restarts that recur in quick succession as "consecutive" -
+    // once the stream has run this long without another stall/freeze,
+    // treat it as recovered and give it a fresh budget.
+    this.problemCooldownTimeout = setTimeout(() => {
+      this.problemCooldownTimeout = null;
+      this.problemRestartCount = 0;
+    }, config.diagnostics.freezeDetectDuration * 2 * 1000);
   }
 
   private scheduleProcessCheck(): void {
@@ -247,9 +293,7 @@ export class CombinedStreamManager {
 
     if (wasLive !== isLive) {
       logStreamEvent(this.id, `Camera ${cameraId} state changed to ${newState}, restarting combined stream to update layout`);
-      // Since handleStall() resets state to STARTING and calls startCombinedStream,
-      // it handles our needs perfectly.
-      this.handleStall();
+      this.restartCombined();
     }
   }
 

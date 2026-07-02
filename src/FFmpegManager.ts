@@ -19,6 +19,12 @@ export class FFmpegManager {
   // flowing). The owning manager wires this to a restart.
   public onLiveStall: (() => void) | null = null;
 
+  // Invoked when freezedetect confirms a visually frozen picture (see
+  // freezeDetectMap in spawnLiveProcess for how cameraId is resolved for the
+  // combined stream's per-tile filters). The owning manager wires this to a
+  // restart.
+  public onFreezeDetected: ((cameraId: string) => void) | null = null;
+
   constructor(streamId: string) {
     this.streamId = streamId;
   }
@@ -37,20 +43,30 @@ export class FFmpegManager {
       });
 
       const { live } = config.ffmpeg;
+      const { freezeDetectEnabled, freezeDetectDuration } = config.diagnostics;
       const args = [
         ...live.inputOptions,
         "-i",
         rtspUrl,
+        ...(freezeDetectEnabled
+          ? ["-vf", `freezedetect=d=${freezeDetectDuration}`]
+          : []),
         ...live.outputOptions,
         youtubeUrl,
       ];
 
-      this.spawnLiveProcess(args, resolve, reject);
+      // A bare "-vf freezedetect=..." with no other filters is always the
+      // sole (and therefore index-0) filter in FFmpeg's graph.
+      const freezeDetectMap = freezeDetectEnabled
+        ? new Map([[0, this.streamId]])
+        : undefined;
+
+      this.spawnLiveProcess(args, resolve, reject, freezeDetectMap);
     });
   }
 
   startCombinedStream(
-    inputs: { url: string; isOffline: boolean }[],
+    inputs: { id: string; url: string; isOffline: boolean }[],
     imagePath: string | undefined,
     youtubeUrl: string,
     streamConfig: CombinedStreamConfig
@@ -103,14 +119,54 @@ export class FFmpegManager {
       // and cause drop/duplicate churn in the composite).
       // We use RTCTIME - RTCSTART to assign wallclock timestamps, which instantly
       // fast-forwards and drops any backlog built up during FFmpeg's sequential input startup.
-      const scaleFilter = (i: number) =>
-        `[${i}:v]setpts='(RTCTIME - RTCSTART) / (TB * 1000000)',fps=${framerate},scale=${tileWidth}:${tileHeight}:force_original_aspect_ratio=decrease,` +
-        `pad=${tileWidth}:${tileHeight}:(ow-iw)/2:(oh-ih)/2,setsar=1[v${i}]`;
+      //
+      // Optionally appends freezedetect per input so a camera whose tile stays
+      // visually static (source stuck, or duplicate-frame churn from the fps
+      // normalization above) gets caught even though the shared process's
+      // overall frame count keeps advancing normally. FFmpeg numbers each
+      // freezedetect instance by its position among *all* filters in the graph,
+      // in declaration order (verified against a real FFmpeg run) - an internal,
+      // undocumented numbering convention, not a stable part of FFmpeg's CLI
+      // contract. filterIndex is derived from each chain's actual stage array
+      // below (stages.length), not a hand-counted literal, so editing a filter
+      // chain can't silently desync the count; the one dependency we can't
+      // remove this way is FFmpeg's own numbering scheme staying consistent
+      // across versions/builds (see the stderr parsing in spawnLiveProcess).
+      const { freezeDetectEnabled, freezeDetectDuration } = config.diagnostics;
+      const freezeIndexToCamera = new Map<number, string>();
+      let filterIndex = 0;
+      const freezeStage = (cameraId: string | undefined): string => {
+        if (!freezeDetectEnabled || !cameraId) return "";
+        freezeIndexToCamera.set(filterIndex, cameraId);
+        filterIndex += 1;
+        return `,freezedetect=d=${freezeDetectDuration}`;
+      };
+
+      const scaleFilter = (i: number) => {
+        const stages = [
+          `setpts='(RTCTIME - RTCSTART) / (TB * 1000000)'`,
+          `fps=${framerate}`,
+          `scale=${tileWidth}:${tileHeight}:force_original_aspect_ratio=decrease`,
+          `pad=${tileWidth}:${tileHeight}:(ow-iw)/2:(oh-ih)/2`,
+          `setsar=1`,
+        ];
+        filterIndex += stages.length;
+        const freeze = freezeStage(inputs[i]?.id);
+        return `[${i}:v]${stages.join(",")}${freeze}[v${i}]`;
+      };
 
       const filterParts = [];
 
       if (totalVideoInputs === 1) {
-        filterParts.push(`[0:v]fps=${framerate},scale=${tileWidth * 2}:${tileHeight * 2}:force_original_aspect_ratio=decrease,pad=${tileWidth * 2}:${tileHeight * 2}:(ow-iw)/2:(oh-ih)/2,setsar=1[out]`);
+        const stages = [
+          `fps=${framerate}`,
+          `scale=${tileWidth * 2}:${tileHeight * 2}:force_original_aspect_ratio=decrease`,
+          `pad=${tileWidth * 2}:${tileHeight * 2}:(ow-iw)/2:(oh-ih)/2`,
+          `setsar=1`,
+        ];
+        filterIndex += stages.length;
+        const freeze = freezeStage(inputs[0]?.id);
+        filterParts.push(`[0:v]${stages.join(",")}${freeze}[out]`);
       } else if (totalVideoInputs === 2) {
         filterParts.push(scaleFilter(0), scaleFilter(1));
         filterParts.push(`[v0][v1]hstack=inputs=2[row]`);
@@ -146,14 +202,20 @@ export class FFmpegManager {
         youtubeUrl
       );
 
-      this.spawnLiveProcess(args, resolve, reject);
+      this.spawnLiveProcess(
+        args,
+        resolve,
+        reject,
+        freezeIndexToCamera.size > 0 ? freezeIndexToCamera : undefined
+      );
     });
   }
 
   private spawnLiveProcess(
     args: string[],
     resolve: () => void,
-    reject: (error: Error) => void
+    reject: (error: Error) => void,
+    freezeDetectMap?: Map<number, string>
   ): void {
     const diag = config.diagnostics;
     const prefixArgs = ["-hide_banner"];
@@ -179,6 +241,7 @@ export class FFmpegManager {
     let settled = false;
     let startupTimeout: NodeJS.Timeout | null = null;
     let lastStderrOutput = "";
+    let freezeStderrBuffer = "";
 
     const settleResolve = () => {
       if (settled) return;
@@ -216,6 +279,26 @@ export class FFmpegManager {
       const output = data.toString();
       lastStderrOutput = output;
       stats?.ingestStderr(output);
+
+      if (freezeDetectMap) {
+        // stderr "data" chunks don't respect line boundaries, so a single log
+        // line (and thus the regex below) can be split across two events -
+        // buffer and only match complete lines, same as ingestProgress does
+        // for stdout.
+        freezeStderrBuffer += output;
+        const lines = freezeStderrBuffer.split("\n");
+        freezeStderrBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const match = line.match(
+            /Parsed_freezedetect_(\d+)[^\]]*\]\s*lavfi\.freezedetect\.freeze_start/
+          );
+          const cameraId = match && freezeDetectMap.get(Number(match[1]));
+          if (cameraId) {
+            logStreamWarning(this.streamId, "Freeze detected", { cameraId });
+            this.onFreezeDetected?.(cameraId);
+          }
+        }
+      }
 
       if (!hasStarted) {
         logStreamDebug(

@@ -23,6 +23,13 @@ export class StreamManager {
   private orphanedStateCheckInterval: NodeJS.Timeout | null = null;
   private hasConnected: boolean = false;
 
+  // Consecutive stall/freeze-triggered restarts (distinct from retryCount,
+  // which tracks connection failures - a stall/freeze restart always
+  // "succeeds" at the FFmpeg level, so retryCount alone never reflects a
+  // camera that keeps coming back live but broken).
+  private problemRestartCount: number = 0;
+  private problemCooldownTimeout: NodeJS.Timeout | null = null;
+
   public onStateChange: ((oldState: StreamState, newState: StreamState) => void) | null = null;
 
   private monitor: StreamMonitor;
@@ -40,7 +47,10 @@ export class StreamManager {
 
     this.monitor.onStreamOffline = () => this.handleStreamOffline();
     this.monitor.onStreamOnline = () => this.handleStreamOnline();
-    this.ffmpeg.onLiveStall = () => this.handleStreamStall();
+    this.ffmpeg.onLiveStall = () =>
+      this.handleStreamProblem("Stream stalled (no frames forwarded)");
+    this.ffmpeg.onFreezeDetected = () =>
+      this.handleStreamProblem("Frozen frame detected (freezedetect)");
   }
 
   async start(): Promise<void> {
@@ -81,6 +91,11 @@ export class StreamManager {
       clearInterval(this.orphanedStateCheckInterval);
       this.orphanedStateCheckInterval = null;
     }
+    if (this.problemCooldownTimeout) {
+      clearTimeout(this.problemCooldownTimeout);
+      this.problemCooldownTimeout = null;
+    }
+    this.problemRestartCount = 0;
 
     this.monitor.stop();
     await this.ffmpeg.stopAll();
@@ -195,16 +210,43 @@ export class StreamManager {
     await this.startLiveStream();
   }
 
-  private async handleStreamStall(): Promise<void> {
+  // Shared handler for both FFmpegManager.onLiveStall and onFreezeDetected -
+  // both mean "the process is running but the picture isn't healthy," so
+  // they get the same restart-with-eventual-offline-fallback treatment.
+  private async handleStreamProblem(reason: string): Promise<void> {
     if (this.state !== StreamState.LIVE) return;
 
-    logStreamWarning(
-      this.id,
-      "Stream stalled (no frames forwarded) - restarting stream"
-    );
+    if (this.problemCooldownTimeout) {
+      clearTimeout(this.problemCooldownTimeout);
+      this.problemCooldownTimeout = null;
+    }
+    this.problemRestartCount++;
+
+    if (this.problemRestartCount >= config.retry.maxAttempts) {
+      logStreamWarning(
+        this.id,
+        `${reason} - too many consecutive restarts, switching to offline placeholder`,
+        { problemRestartCount: this.problemRestartCount }
+      );
+      this.problemRestartCount = 0;
+      await this.startOfflineStream();
+      return;
+    }
+
+    logStreamWarning(this.id, `${reason} - restarting stream`, {
+      problemRestartCount: this.problemRestartCount,
+    });
     this.setState(StreamState.STARTING);
     this.retryCount = 0;
     await this.startLiveStream();
+
+    // Only count restarts that recur in quick succession as "consecutive" -
+    // once the stream has run this long without another stall/freeze,
+    // treat it as recovered and give it a fresh budget.
+    this.problemCooldownTimeout = setTimeout(() => {
+      this.problemCooldownTimeout = null;
+      this.problemRestartCount = 0;
+    }, config.diagnostics.freezeDetectDuration * 2 * 1000);
   }
 
   private async handleStreamOnline(): Promise<void> {

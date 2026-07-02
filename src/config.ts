@@ -39,6 +39,14 @@ function cameraEnabled(n: number): boolean {
   return TRUTHY.has(value.toLowerCase());
 }
 
+// Freeze detection is on unless FREEZE_DETECT_ENABLED is explicitly set to a
+// falsy value.
+const freezeDetectEnabled = (() => {
+  const value = process.env.FREEZE_DETECT_ENABLED;
+  if (value === undefined || value === "") return true;
+  return TRUTHY.has(value.toLowerCase());
+})();
+
 function buildStreams(): Config["streams"] {
   const streams: Config["streams"] = [];
   for (let n = 1; n <= 4; n++) {
@@ -270,6 +278,8 @@ const config: Config = {
     statsPeriod: 5,
     reportInterval: 30,
     restartOnStall: true,
+    freezeDetectEnabled,
+    freezeDetectDuration: 300,
   },
 
   process: {
