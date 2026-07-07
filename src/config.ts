@@ -129,12 +129,34 @@ const combinedInputOptions = [
   "tcp",
   "-rtsp_flags",
   "prefer_tcp",
+  // Lower than the individual streams: these inputs are the local MediaMTX
+  // relay serving known H.264, so a 10s/10MB probe is wasteful and widens the
+  // sequential input-open gap. 3s/3MB is plenty and makes restarts faster.
   "-analyzeduration",
-  "10000000",
+  "3000000",
   "-probesize",
-  "10000000",
+  "3000000",
+  // igndts + wallclock timestamps are the key fix for a single tile (usually
+  // the flakier camera) freezing forever: when its relay source reconnects,
+  // the RTP/PTS timeline jumps. Without wallclock, the demuxer rejects the
+  // resumed frames as non-monotonic and the fps filter clones the last good
+  // frame indefinitely while the overall process stays alive (so nothing
+  // restarts). Stamping every packet with its arrival wallclock at the demuxer
+  // - exactly what the individual streams already do - keeps each input
+  // monotonic across source reconnects; igndts drops the stale DTS check
+  // instead of the frames. setpts in the filter graph then rebases to zero.
   "-fflags",
-  "+genpts+discardcorrupt",
+  "+genpts+discardcorrupt+igndts",
+  "-use_wallclock_as_timestamps",
+  "1",
+  // Socket I/O read timeout (µs). A live input delivers ~10fps continuously,
+  // so this only fires on a genuine dead input: the process then errors out
+  // and CombinedStreamManager restarts (rebuilding the grid without the dead
+  // camera) instead of silently cloning its last frame. 20s > MediaMTX's
+  // ~10s source-reconnect window, so normal reconnects are absorbed by the
+  // wallclock armor above rather than triggering a restart.
+  "-timeout",
+  "20000000",
   "-rtbufsize",
   "16M",
 ];
