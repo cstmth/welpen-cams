@@ -172,6 +172,13 @@ const flvOutputOptions = [
 
 const combinedYoutube = process.env.COMBINED_YOUTUBE;
 
+// Unconditionally restart the combined stream every N minutes, regardless of
+// health checks. Unset/0/invalid disables it.
+const combinedRestartIntervalMinutes = (() => {
+  const value = Number(process.env.COMBINED_RESTART_INTERVAL_MINUTES);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+})();
+
 const config: Config = {
   streams: buildStreams(),
 
@@ -185,6 +192,7 @@ const config: Config = {
         tileHeight: combinedTileHeight,
         framerate: combinedFramerate,
         inputOptions: combinedInputOptions,
+        restartIntervalMinutes: combinedRestartIntervalMinutes,
         outputOptions: [
           "-af",
           "volume=0.001",

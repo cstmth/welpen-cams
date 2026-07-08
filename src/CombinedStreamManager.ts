@@ -25,6 +25,7 @@ export class CombinedStreamManager {
   private retryTimeout: NodeJS.Timeout | null = null;
   private offlineRetryTimeout: NodeJS.Timeout | null = null;
   private processCheckInterval: NodeJS.Timeout | null = null;
+  private forcedRestartInterval: NodeJS.Timeout | null = null;
 
   // Consecutive stall/freeze-triggered restarts (distinct from retryCount,
   // which tracks connection failures - a stall/freeze restart always
@@ -86,6 +87,10 @@ export class CombinedStreamManager {
       clearInterval(this.processCheckInterval);
       this.processCheckInterval = null;
     }
+    if (this.forcedRestartInterval) {
+      clearInterval(this.forcedRestartInterval);
+      this.forcedRestartInterval = null;
+    }
     if (this.problemCooldownTimeout) {
       clearTimeout(this.problemCooldownTimeout);
       this.problemCooldownTimeout = null;
@@ -140,6 +145,7 @@ export class CombinedStreamManager {
       logStreamEvent(this.id, "Combined stream started successfully");
 
       this.scheduleProcessCheck();
+      this.scheduleForcedRestart();
     } catch (error) {
       logStreamError(this.id, error as Error, {
         context: "Failed to start combined stream",
@@ -268,6 +274,29 @@ export class CombinedStreamManager {
         this.startCombinedStream();
       }
     }, PROCESS_CHECK_INTERVAL);
+  }
+
+  // Blunt mitigation for a tile that freezes without ever tripping
+  // stall/freeze detection: unconditionally restart on a fixed cadence
+  // regardless of any health signal. Opt-in via
+  // COMBINED_RESTART_INTERVAL_MINUTES; disabled (undefined) by default.
+  private scheduleForcedRestart(): void {
+    if (this.forcedRestartInterval) {
+      clearInterval(this.forcedRestartInterval);
+      this.forcedRestartInterval = null;
+    }
+
+    const minutes = this.streamConfig.restartIntervalMinutes;
+    if (!minutes) return;
+
+    this.forcedRestartInterval = setInterval(() => {
+      if (this.state !== StreamState.LIVE) return;
+      logStreamEvent(
+        this.id,
+        `Scheduled restart (COMBINED_RESTART_INTERVAL_MINUTES=${minutes})`
+      );
+      this.restartCombined();
+    }, minutes * 60 * 1000);
   }
 
   private scheduleRecoveryCheck(): void {

@@ -21,6 +21,10 @@ export interface CombinedStreamConfig {
   framerate: number;
   inputOptions: string[];
   outputOptions: string[];
+  // Unconditionally restart the combined stream on this interval regardless
+  // of health signals, as a blunt mitigation for a tile that freezes without
+  // ever tripping stall/freeze detection. undefined/0 disables it.
+  restartIntervalMinutes?: number;
 }
 
 export interface MonitoringConfig {
