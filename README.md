@@ -47,12 +47,22 @@ Everything is configured via `.env`:
 
 ### Cameras
 
+Cameras are defined as `CAMERA_<n>_*` numbered contiguously from 1 (`CAMERA_1_*`,
+`CAMERA_2_*`, …). There is **no fixed camera count** — add a fifth by setting
+`CAMERA_5_*`, a sixth with `CAMERA_6_*`, and so on. `CAMERA_<n>_YOUTUBE` is what
+marks a camera as present; discovery stops at the first `n` with no
+`CAMERA_<n>_YOUTUBE`.
+
 | Variable | Required | Description |
 |---|---|---|
-| `CAMERA_1_RTSP` | Yes | Base URL without stream path, e.g. `rtsp://user:pass@192.168.1.100:554` |
-| `CAMERA_1_YOUTUBE` | Yes | YouTube RTMP URL |
-| `CAMERA_2_RTSP` … `CAMERA_4_YOUTUBE` | Yes | Same for cameras 2-4 |
+| `CAMERA_<n>_RTSP` | Yes (if enabled) | Base URL without stream path, e.g. `rtsp://user:pass@192.168.1.100:554` |
+| `CAMERA_<n>_YOUTUBE` | Yes | YouTube RTMP URL — also marks the camera as present |
+| `CAMERA_<n>_ENABLED` | No | `false` streams only the offline placeholder and drops the camera from the grid; RTSP not required. Defaults to `true`. |
 | `COMBINED_YOUTUBE` | No | YouTube RTMP URL for the 2x2 grid stream. Remove to disable. |
+
+The combined grid is a fixed 2x2 layout, so it only ever composites the **first
+four** cameras. Every configured camera still streams its own individual YouTube
+endpoint; cameras 5+ simply don't appear in the overview.
 
 ### Encoding
 

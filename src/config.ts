@@ -47,9 +47,16 @@ const freezeDetectEnabled = (() => {
   return TRUTHY.has(value.toLowerCase());
 })();
 
+// Cameras are discovered dynamically: CAMERA_1_*, CAMERA_2_*, … numbered
+// contiguously from 1. Each camera streams its own YouTube endpoint, so
+// CAMERA_<n>_YOUTUBE is what marks a camera as "present" — discovery stops at
+// the first n with no CAMERA_<n>_YOUTUBE set. There is no upper limit; the
+// combined overview grid caps itself at the first four (see
+// CombinedStreamManager), but every configured camera still streams
+// individually.
 function buildStreams(): Config["streams"] {
   const streams: Config["streams"] = [];
-  for (let n = 1; n <= 4; n++) {
+  for (let n = 1; process.env[`CAMERA_${n}_YOUTUBE`] !== undefined; n++) {
     const id = `camera-${n}`;
     const enabled = cameraEnabled(n);
     streams.push({
@@ -59,6 +66,11 @@ function buildStreams(): Config["streams"] {
       youtube: requireEnv(`CAMERA_${n}_YOUTUBE`),
       enabled,
     });
+  }
+  if (streams.length === 0) {
+    throw new Error(
+      "No cameras configured: set at least CAMERA_1_YOUTUBE (and CAMERA_1_RTSP)"
+    );
   }
   return streams;
 }

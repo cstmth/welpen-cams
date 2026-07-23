@@ -12,6 +12,12 @@ import type { StreamManager } from "./StreamManager.js";
 const RECOVERY_INTERVAL = 60000;
 const PROCESS_CHECK_INTERVAL = 10000;
 
+// The overview is a fixed 2x2 grid, so it only ever composites the first four
+// configured cameras. Any additional cameras (5th, 6th, …) still stream their
+// own individual YouTube endpoints — they just never appear in the combined
+// grid and never trigger a grid rebuild.
+const OVERVIEW_MAX_CAMERAS = 4;
+
 export class CombinedStreamManager {
   private id: string;
   private name: string;
@@ -41,7 +47,9 @@ export class CombinedStreamManager {
     this.name = combinedConfig.name;
     this.youtubeUrl = combinedConfig.youtube;
     this.imagePath = combinedConfig.imagePath;
-    this.streamManagers = streamManagers;
+    // Only the first four cameras feed the overview grid; the rest stream
+    // individually and are irrelevant to this manager.
+    this.streamManagers = streamManagers.slice(0, OVERVIEW_MAX_CAMERAS);
     this.streamConfig = combinedConfig;
     this.ffmpeg = new FFmpegManager(this.id);
 
@@ -315,6 +323,10 @@ export class CombinedStreamManager {
 
   handleCameraStateChange(cameraId: string, oldState: StreamState, newState: StreamState): void {
     if (this.state !== StreamState.LIVE) return;
+
+    // Cameras beyond the first four are not part of the overview, so their
+    // state changes never affect the grid layout.
+    if (!this.streamManagers.some((m) => m.getStatus().id === cameraId)) return;
 
     // Restart layout if a camera becomes LIVE or stops being LIVE
     const wasLive = oldState === StreamState.LIVE;
